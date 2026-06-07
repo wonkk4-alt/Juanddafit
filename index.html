@@ -191,9 +191,16 @@ const DB = {
   },
 
   async saveRoutine(uid, day, exercises){
-    await db_fs.collection('routines').doc(uid).set({
-      [`days.${day}`]: exercises
-    }, {merge: true});
+    // Guardar como objeto anidado real que Firestore entiende
+    var update = {};
+    update['days'] = {};
+    // Primero leer la rutina actual y mergear
+    try{
+      var existing = await this.getRoutine(uid);
+      update['days'] = Object.assign({}, existing);
+    }catch(e){}
+    update['days'][day] = exercises;
+    await db_fs.collection('routines').doc(uid).set(update, {merge: true});
     return true;
   },
 
@@ -766,17 +773,12 @@ class ErrorBoundary extends React.Component {
 
 // ─── INICIALIZACIÓN ENTRENADOR JUANDA (solo primera vez) ─────────────────────
 (async function initTrainer(){
+  // El documento del trainer se crea manualmente en Firestore
+  // Esta función solo verifica silenciosamente
   try{
     const snap = await db_fs.collection('users').where('role','==','trainer').limit(1).get();
-    if(snap.empty){
-      await db_fs.collection('users').doc('trainer_juanda').set({
-        uid:'trainer_juanda', email:'juanda@juandafit.com',
-        name:'Juanda', role:'trainer', pin:'2434',
-        color:'#00bcd4', light:'#152535',
-        profileStatus:'complete', createdAt:Date.now()
-      });
-    }
-  }catch(e){ console.warn('trainer init error',e); }
+    if(!snap.empty){ console.log('Trainer encontrado en Firestore'); }
+  }catch(e){ /* Sin permisos aún — normal antes del login */ }
 })();
 
 const {useState,useEffect,useRef,useCallback} = React;
@@ -1047,6 +1049,12 @@ function TrainerLoginScreen({onBack, onLogin}){
       const trainer = snap.docs[0].data();
       if(String(trainer.pin) !== String(pin)) throw new Error('PIN incorrecto.');
       localStorage.setItem('jf_current_session', trainer.email);
+      // Autenticar en Firebase Auth como anónimo para poder escribir en Firestore
+      try{
+        if(auth && !auth.currentUser){
+          await auth.signInAnonymously();
+        }
+      }catch(e){ console.warn('Anonymous auth error:', e); }
       const theme = getTrainerTheme(0);
       if(onLogin) onLogin({...trainer,...theme}, null);
     }catch(e){
@@ -1962,10 +1970,15 @@ function UserFicha({user:u,trainer,onBack}){
   }
 
   async function saveDay(){
-    await DB.saveRoutine(u.uid||u.email,selDay,dayRtn,trainer);
-    setRoutines(r=>({...r,[selDay]:dayRtn}));
-    setVer(v=>v+1);
-    setSelDay(null);
+    try{
+      await DB.saveRoutine(u.uid,selDay,dayRtn);
+      setRoutines(r=>({...r,[selDay]:dayRtn}));
+      setVer(v=>v+1);
+      setSelDay(null);
+    }catch(e){
+      console.error('saveDay error:',e);
+      alert('Error al guardar: '+(e.message||'verifica tu conexión'));
+    }
   }
 
   function updateEx(id,field,delta){
@@ -2213,12 +2226,16 @@ function DayEditTrainer({user:u,trainer,day,exercises,notes,onBack,onSave,onUpda
 
   async function saveExInfo(){
     setSavingEx(true);
-    // Filter out empty links before saving
-    const cleanLinks=(exInfoDraft.links||[]).filter(l=>l.url&&l.url.trim());
-    const dataToSave={links:cleanLinks,description:exInfoDraft.description};
-    await DB.saveExInfo(exEditing,dataToSave,trainer);
-    setExInfoCache(c=>({...c,[exEditing]:{...dataToSave}}));
-    setExEditing(null);
+    try{
+      const cleanLinks=(exInfoDraft.links||[]).filter(l=>l.url&&l.url.trim());
+      const dataToSave={links:cleanLinks,description:exInfoDraft.description||''};
+      await DB.saveExInfo(exEditing,dataToSave);
+      setExInfoCache(c=>({...c,[exEditing]:{...dataToSave}}));
+      setExEditing(null);
+    }catch(e){
+      console.error('saveExInfo error:',e);
+      alert('Error al guardar info: '+(e.message||'verifica conexión'));
+    }
     setSavingEx(false);
   }
 

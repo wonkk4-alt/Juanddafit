@@ -1043,20 +1043,33 @@ function TrainerLoginScreen({onBack, onLogin}){
     if(!pin||pin.length<3){setErr('Ingresa tu PIN');return;}
     setLoading(true);setErr('');
     try{
-      // Buscar trainer en Firestore por rol=trainer y verificar PIN
+      // 1. Verificar PIN en Firestore (lectura pública)
       const snap = await db_fs.collection('users').where('role','==','trainer').limit(1).get();
       if(snap.empty) throw new Error('No hay entrenador registrado.');
-      const trainer = snap.docs[0].data();
-      if(String(trainer.pin) !== String(pin)) throw new Error('PIN incorrecto.');
-      localStorage.setItem('jf_current_session', trainer.email);
-      // Autenticar en Firebase Auth como anónimo para poder escribir en Firestore
+      const trainerDoc = snap.docs[0].data();
+      if(String(trainerDoc.pin) !== String(pin)) throw new Error('PIN incorrecto.');
+
+      // 2. Autenticar con Firebase Auth real (email+PIN como password)
+      // Esto permite escribir en Firestore con las reglas normales
+      const email = trainerDoc.email;
+      const password = 'juandafit_' + pin; // password derivada del PIN
       try{
-        if(auth && !auth.currentUser){
-          await auth.signInAnonymously();
+        await auth.signInWithEmailAndPassword(email, password);
+      }catch(authErr){
+        if(authErr.code === 'auth/user-not-found' || authErr.code === 'auth/invalid-credential' || authErr.code === 'auth/wrong-password'){
+          // Primera vez: crear el usuario en Firebase Auth
+          try{
+            await auth.createUserWithEmailAndPassword(email, password);
+          }catch(createErr){
+            // Si ya existe pero con otra contraseña, actualizar
+            console.warn('Auth create error:', createErr.code);
+          }
         }
-      }catch(e){ console.warn('Anonymous auth error:', e); }
+      }
+
+      localStorage.setItem('jf_current_session', email);
       const theme = getTrainerTheme(0);
-      if(onLogin) onLogin({...trainer,...theme}, null);
+      if(onLogin) onLogin({...trainerDoc,...theme}, null);
     }catch(e){
       setLoading(false);
       setErr(e.message||'PIN incorrecto. Intenta de nuevo.');
@@ -2181,7 +2194,8 @@ function DayEditTrainer({user:u,trainer,day,exercises,notes,onBack,onSave,onUpda
   const [noteEditing,setNoteEditing]=useState(null); // exerciseId
   const [noteDraft,setNoteDraft]=useState('');
   const [exEditing,setExEditing]=useState(null); // exerciseId for global info edit
-  const [exInfoDraft,setExInfoDraft]=useState({links:[],description:''}); // draft global info (links: [{url,label}])
+  const [exInfoDraft,setExInfoDraft]=useState({links:[],description:''}); // draft glo
+  const [exEditErr,setExEditErr]=useState(''); // error al abrir/guardar info ejerciciobal info (links: [{url,label}])
   const [exInfoCache,setExInfoCache]=useState({}); // exId -> info from Firestore
   const [savingEx,setSavingEx]=useState(false);
 
@@ -2199,7 +2213,10 @@ function DayEditTrainer({user:u,trainer,day,exercises,notes,onBack,onSave,onUpda
   },[exercises.length]);
 
   async function openExEdit(exId){
-    const info=await DB.getExInfo(exId); // null si nunca editado
+    setExEditErr('');
+    let info;
+    try{ info=await DB.getExInfo(exId); }
+    catch(e){ setExEditErr('Error al cargar info: '+(e.message||'verifica conexión')); return; }
     const baseEx=exercises.find(e=>e.id===exId)||{};
     let links=[];
     if(info===null){
@@ -2358,6 +2375,7 @@ function DayEditTrainer({user:u,trainer,day,exercises,notes,onBack,onSave,onUpda
               : React.createElement('span',{style:{fontSize:10,color:'#7aadbe'}},'Agregar video / descripción global'),
               React.createElement('span',{style:{fontSize:11,color:'#00bcd4',fontWeight:700}},'Editar')
             ),
+          exEditErr&&React.createElement('div',{style:{padding:'4px 12px',fontSize:11,color:'#ff6b6b'}},exEditErr),
           // Note section
 
           noteEditing===ex.id?

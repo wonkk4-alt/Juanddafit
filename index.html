@@ -73,29 +73,38 @@ textarea{resize:vertical}
 // ─── DB HELPERS ────────────────────────────────────────────────────────────────
 // ─── FIREBASE CONFIG ─────────────────────────────────────────────────────────
 var auth, db_fs;
-try {
-  const firebaseConfig = {
-    apiKey: "AIzaSyBWWV64ZZb0T3a2tDYjbLfBt41Btt5_x3c",
-    authDomain: "juandafit.firebaseapp.com",
-    projectId: "juandafit",
-    storageBucket: "juandafit.firebasestorage.app",
-    messagingSenderId: "196490142129",
-    appId: "1:196490142129:web:48bcdc176d05e553cddd90"
-  };
-  if(typeof firebase !== 'undefined'){
-    firebase.initializeApp(firebaseConfig);
+const firebaseConfig = {
+  apiKey: "AIzaSyBWWV64ZZb0T3a2tDYjbLfBt41Btt5_x3c",
+  authDomain: "juandafit.firebaseapp.com",
+  projectId: "juandafit",
+  storageBucket: "juandafit.firebasestorage.app",
+  messagingSenderId: "196490142129",
+  appId: "1:196490142129:web:48bcdc176d05e553cddd90"
+};
+
+function initFirebaseOnce(){
+  if(auth && db_fs) return true;
+  if(typeof firebase === 'undefined'){
+    console.error('Firebase no disponible — verifica conexión a internet');
+    return false;
+  }
+  try{
+    if(!firebase.apps || !firebase.apps.length){
+      firebase.initializeApp(firebaseConfig);
+    }
     auth = firebase.auth();
     db_fs = firebase.firestore();
-    // Habilitar caché offline de Firestore
-    db_fs.settings({ cacheSizeBytes: firebase.firestore.CACHE_SIZE_UNLIMITED });
-    db_fs.enablePersistence().catch(e => console.warn('Offline persistence:', e.code));
+    try{ db_fs.settings({ cacheSizeBytes: firebase.firestore.CACHE_SIZE_UNLIMITED }); }catch(e){}
+    try{ db_fs.enablePersistence().catch(e => console.warn('Offline persistence:', e.code)); }catch(e){}
     console.log('Firebase iniciado correctamente');
-  } else {
-    console.error('Firebase no disponible — verifica conexión a internet');
+    return true;
+  }catch(e){
+    console.error('Firebase init error:', e);
+    return false;
   }
-} catch(e) {
-  console.error('Firebase init error:', e);
 }
+
+initFirebaseOnce();
 
 // ─── DB (Firebase) ────────────────────────────────────────────────────────────
 const DB = {
@@ -479,94 +488,6 @@ const CAT={
 {id:"E155",name:"ESCALERA DE COORDINACIÓN",zone:"Zona Cardio",machine:"Escalera de agilidad"},
 {id:"E156",name:"SACO DE BOXEO",zone:"Zona Cardio",machine:"Saco de boxeo"},
 ],
-  // Stubs de compatibilidad (funciones removidas de Firebase)
-  watchUserProfile(uid, cb){ return function(){ }; },
-  watchNote(uid, exId, cb){ return function(){ }; },
-  watchExInfo(exId, cb){ return function(){ }; },
-  watchMachineStatus(id, cb){ return function(){ }; },
-  // ── Aliases y funciones que usa la app ──────────────────────────────────────
-
-  // getAllRoutines = getRoutine (retorna objeto {day: [exercises]})
-  async getAllRoutines(uid){
-    const routines = this._ls('jf_routines', {});
-    if(routines[uid]) return routines[uid];
-    // Fallback: buscar por email si uid no tiene datos
-    const users = this._ls('jf_users', {});
-    const user = Object.values(users).find(u => u.uid === uid);
-    if(user && user.email && routines[user.email]) return routines[user.email];
-    return {};
-  },
-
-  // getNote = obtener nota de un ejercicio específico
-  async getNote(uid, exId){
-    const notes = this._ls('jf_notes', {});
-    return (notes[uid] || {})[exId] || '';
-  },
-
-  // getExInfo = getExerciseInfo
-  async getExInfo(exId){
-    return this.getExerciseInfo(exId);
-  },
-
-  // saveExInfo = saveExerciseInfo
-  async saveExInfo(exId, data){
-    return this.saveExerciseInfo(exId, data);
-  },
-
-  // postHelp = requestHelp con interfaz simplificada
-  async postHelp(data){
-    const reqs = this._ls('jf_helpreqs', {});
-    reqs[data.userId] = {
-      userId: data.userId,
-      userName: data.userName,
-      userEmail: data.userEmail || '',
-      day: data.day || '',
-      exercise: data.exercise || '',
-      exerciseId: data.exerciseId || '',
-      status: 'pending',
-      claimedBy: null,
-      createdAt: Date.now(),
-      age: data.age || '',
-      cond: data.cond || ''
-    };
-    this._lsSet('jf_helpreqs', reqs);
-    return true;
-  },
-
-  // Asistencia semanal
-  async setAtt(uid, day, status){
-    const key = 'jf_att_' + uid;
-    const att = this._ls(key, {});
-    const week = new Date().toISOString().slice(0,10).slice(0,7);
-    if(!att[week]) att[week] = {};
-    att[week][day] = {s: status, t: Date.now()};
-    this._lsSet(key, att);
-    return true;
-  },
-
-  async getWeekAtt(uid){
-    const key = 'jf_att_' + uid;
-    const att = this._ls(key, {});
-    const week = new Date().toISOString().slice(0,10).slice(0,7);
-    return att[week] || {};
-  },
-
-  // Logs de ejercicio
-  async getExerciseLog(uid, exId, date){
-    const key = 'jf_logs_' + uid;
-    const logs = this._ls(key, {});
-    return (logs[date] || {})[exId] || null;
-  },
-
-  async saveExerciseLog(uid, exId, date, data){
-    const key = 'jf_logs_' + uid;
-    const logs = this._ls(key, {});
-    if(!logs[date]) logs[date] = {};
-    logs[date][exId] = data;
-    this._lsSet(key, logs);
-    return true;
-  },
-
 };
 
 // ─── MuscleWiki URL slugs (todos verificados) ─────────────────────────────────
@@ -731,14 +652,14 @@ const MW_URL={
 ;
 // Flatten exercises
 
-const ALL_EXERCISES = Object.values(CAT).flat();
+const ALL_EXERCISES = Object.values(CAT).filter(Array.isArray).flat();
 function getEx(id){return ALL_EXERCISES.find(e=>e.id===id);}
 function catColor(cat){
   const colors={'PECHO · HOMBRO · TRICEPS':'#ef4444','ESPALDA · BICEPS':'#3b82f6','PIERNA':'#22c55e','GLÚTEO':'#a855f7','PILAR · ESTABILIDAD':'#f59e0b','MOVILIDAD':'#06b6d4','CARDIO · VASCULAR':'#00bcd4'};
   return colors[cat]||'#64748b';
 }
 function exColor(exId){
-  for(const[cat,exs] of Object.entries(CAT)){if(exs.find(e=>e.id===exId))return catColor(cat);}
+  for(const [cat,exs] of Object.entries(CAT)){ if(Array.isArray(exs) && exs.find(e=>e.id===exId)) return catColor(cat); }
   return '#64748b';
 }
 
@@ -781,7 +702,7 @@ class ErrorBoundary extends React.Component {
   }catch(e){ /* Sin permisos aún — normal antes del login */ }
 })();
 
-const {useState,useEffect,useRef,useCallback} = React;
+let useState, useEffect, useRef, useCallback;
 
 function App(){
   // authReady: false mientras Firebase verifica sesión inicial
@@ -1984,7 +1905,7 @@ function UserFicha({user:u,trainer,onBack}){
 
   async function saveDay(){
     try{
-      await DB.saveRoutine(u.uid,selDay,dayRtn);
+      await DB.saveRoutine(u.uid||u.email,selDay,dayRtn);
       setRoutines(r=>({...r,[selDay]:dayRtn}));
       setVer(v=>v+1);
       setSelDay(null);
@@ -2201,16 +2122,23 @@ function DayEditTrainer({user:u,trainer,day,exercises,notes,onBack,onSave,onUpda
 
   // Load exInfo for all exercises in this day
   useEffect(()=>{
+    let mounted=true;
     async function loadAllInfo(){
       const cache={};
       for(const ex of exercises){
-        const info=await DB.getExInfo(ex.id);
-        if(info)cache[ex.id]=info;
+        try{
+          const info=await DB.getExInfo(ex.id);
+          if(info)cache[ex.id]=info;
+        }catch(e){
+          console.warn('getExInfo cache error:', ex.id, e);
+        }
       }
-      setExInfoCache(cache);
+      if(mounted) setExInfoCache(cache);
     }
     if(exercises.length)loadAllInfo();
-  },[exercises.length]);
+    else setExInfoCache({});
+    return ()=>{mounted=false;};
+  },[exercises]);
 
   async function openExEdit(exId){
     setExEditErr('');
@@ -2219,7 +2147,7 @@ function DayEditTrainer({user:u,trainer,day,exercises,notes,onBack,onSave,onUpda
     catch(e){ setExEditErr('Error al cargar info: '+(e.message||'verifica conexión')); return; }
     const baseEx=exercises.find(e=>e.id===exId)||{};
     let links=[];
-    if(info===null){
+    if(!info){
       // Nunca editado: pre-cargar links originales del catálogo para comodidad
       const defaultLabels=['Tutorial principal','Tutorial alternativo','Tutorial extra'];
       [baseEx.video,baseEx.video2,baseEx.video3].forEach((u,i)=>{
@@ -2399,7 +2327,7 @@ function DayEditTrainer({user:u,trainer,day,exercises,notes,onBack,onSave,onUpda
         exercises.length>0&&React.createElement('button',{className:'btn btn-primary',onClick:onSave,style:{marginTop:8}},'Guardar rutina')
       ),
       tab==='add'&&React.createElement('div',null,
-        Object.entries(CAT).map(([cat,exsList])=>React.createElement('div',{key:cat,style:{marginBottom:8}},
+        Object.entries(CAT).filter(([,exsList])=>Array.isArray(exsList)).map(([cat,exsList])=>React.createElement('div',{key:cat,style:{marginBottom:8}},
           React.createElement('div',{onClick:()=>setOpenCat(openCat===cat?null:cat),style:{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'10px 12px',background:'#152535',borderRadius:10,border:'1.5px solid '+(openCat===cat?catColor(cat):'#1e4a6a'),cursor:'pointer',marginBottom:openCat===cat?0:0}},
             React.createElement('div',{style:{display:'flex',alignItems:'center',gap:8}},
               React.createElement('div',{style:{width:8,height:8,borderRadius:'50%',background:catColor(cat)}}),
@@ -2426,7 +2354,29 @@ function DayEditTrainer({user:u,trainer,day,exercises,notes,onBack,onSave,onUpda
 }
 
 // ─── RENDER ───────────────────────────────────────────────────────────────────
-ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(ErrorBoundary,null,React.createElement(App)));
+(function bootJuandaFit(){
+  function showMissingDeps(){
+    document.body.style.cssText = 'background:#0d1b2a;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;font-family:sans-serif;';
+    document.body.innerHTML = '<div style="text-align:center;color:#e2f7fb;padding:32px;max-width:320px"><div style="font-size:48px;margin-bottom:16px">📡</div><div style="font-size:18px;font-weight:700;color:#00bcd4;margin-bottom:12px">No se pudo cargar JuandaFit</div><div style="font-size:13px;color:#a8cdd8;line-height:1.6">Verifica la conexión a internet y recarga la página.</div><button onclick="location.reload()" style="margin-top:20px;padding:12px 24px;border-radius:12px;border:none;background:#00bcd4;color:#fff;font-weight:700;font-size:14px;cursor:pointer">Reintentar</button></div>';
+  }
+
+  function start(){
+    if(typeof React === 'undefined' || typeof ReactDOM === 'undefined' || !initFirebaseOnce()){
+      showMissingDeps();
+      return;
+    }
+    ({useState,useEffect,useRef,useCallback} = React);
+    const root=document.getElementById('root');
+    if(!root){ showMissingDeps(); return; }
+    ReactDOM.createRoot(root).render(React.createElement(ErrorBoundary,null,React.createElement(App)));
+  }
+
+  if(document.readyState === 'loading'){
+    window.addEventListener('DOMContentLoaded', start);
+  }else{
+    setTimeout(start,0);
+  }
+})();
 </script>
 </body>
 </html>

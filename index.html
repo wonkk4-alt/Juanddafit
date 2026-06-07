@@ -8,7 +8,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=Exo+2:wght@400;500;600;700;900&display=swap" rel="stylesheet">
 
 <!-- React -->
-<script type="text/javascript" src="https://gc.kis.v2.scr.kaspersky-labs.com/FD126C42-EBFA-4E12-B309-BB3FDD723AC1/main.js?attr=7cdv0ekZnU0eAU2FbOKwOGcILiPV_tzcf8q_gNVSjJ_niFQ0O47nbXPWZCKXVR-6zu9nPLtZ_H6DyQOV7ryLzcsKjUBfh_Y_Hg8E0JicxV2YTOd-6hcxL1GACmjHOtx1iOyz5B6-rkWD7C5YmzdNAwoYWuKguwFi3tvY9Qm5onA0n_0jLPdqsqerkW5AUQi007AFA5PTB4In2mXS65GedxW5ec9n1OO3nfR7X6lysVna1xiUdkptvwocLV8bSlms1MtsXLrMOjf3fEz2rPH2UX-LKSotLRWq0-OV9tc4S1A-Um96u8cCiebEkr_4PE4H4a1C7EHLh_zxoL_LWCDzPA" charset="UTF-8"></script><script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <!-- Firebase -->
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
@@ -279,8 +279,13 @@ const DB = {
   // ── Asistencia ────────────────────────────────────────────────────────────────
   async setAtt(uid, day, status){
     const week = new Date().toISOString().slice(0,7);
+    // Guardar como objeto anidado real: { "2026-06": { lun: {...} } }
+    // Antes se usaba una clave con punto (`2026-06.lun`), pero getWeekAtt
+    // lee datos anidados; por eso el día no quedaba verde aunque se guardara.
     await db_fs.collection('attendance').doc(uid).set({
-      [`${week}.${day}`]: {s: status, t: Date.now()}
+      [week]: {
+        [day]: {s: status, t: Date.now()}
+      }
     }, {merge: true});
     return true;
   },
@@ -289,19 +294,36 @@ const DB = {
     const week = new Date().toISOString().slice(0,7);
     const snap = await db_fs.collection('attendance').doc(uid).get();
     if(!snap.exists) return {};
-    return snap.data()[week] || {};
+    const data = snap.data() || {};
+    const nested = data[week] || {};
+    // Compatibilidad con registros viejos guardados como "2026-06.lun".
+    const legacy = {};
+    Object.keys(data).forEach(k=>{
+      if(k.indexOf(week+'.')===0){
+        legacy[k.slice(week.length+1)] = data[k];
+      }
+    });
+    return Object.assign({}, legacy, nested);
   },
 
   // ── Logs de ejercicio ─────────────────────────────────────────────────────────
   async getExerciseLog(uid, exId, date){
     const snap = await db_fs.collection('exerciseLogs').doc(uid).get();
     if(!snap.exists) return null;
-    return (snap.data()[date] || {})[exId] || null;
+    const data = snap.data() || {};
+    // Formato correcto: { "2026-06-07": { E001: {...} } }
+    const nested = (data[date] || {})[exId];
+    // Compatibilidad con logs viejos guardados como clave plana "2026-06-07.E001".
+    const legacy = data[`${date}.${exId}`];
+    return nested || legacy || null;
   },
 
   async saveExerciseLog(uid, exId, date, data){
+    // Guardar como objeto anidado real para que getExerciseLog pueda leerlo.
     await db_fs.collection('exerciseLogs').doc(uid).set({
-      [`${date}.${exId}`]: data
+      [date]: {
+        [exId]: data
+      }
     }, {merge: true});
     return true;
   },
@@ -1312,6 +1334,20 @@ function ExerciseScreen({user,day,exercise:ex,routine,onBack}){
     },1000);
   }
 
+  async function maybeAutoCompleteDay(currentExerciseId, currentLog){
+    if(!routine || routine.length===0 || !currentLog || !currentLog.allDone)return;
+    try{
+      let completed=0;
+      for(const rex of routine){
+        const l = rex.id===currentExerciseId ? currentLog : await DB.getExerciseLog(user.uid,rex.id,today);
+        if(l && l.allDone)completed++;
+      }
+      if(completed===routine.length){
+        await DB.setAtt(user.uid,day,'done');
+      }
+    }catch(e){console.warn('No se pudo autocompletar el día:',e);}
+  }
+
   async function toggleSet(i){
     if(!log)return;
     const wasDown=!log.sets[i].done;
@@ -1320,20 +1356,23 @@ function ExerciseScreen({user,day,exercise:ex,routine,onBack}){
     const nl={...log,sets:newSets,allDone};
     setLog(nl);
     await DB.saveExerciseLog(user.uid,ex.id,today,nl);
+    if(allDone)await maybeAutoCompleteDay(ex.id,nl);
     if(wasDown)startRest(localRest);
   }
 
-  function updateRepsDone(i,val){
+  async function updateRepsDone(i,val){
     if(!log)return;
     const newSets=log.sets.map((s,idx)=>idx===i?{...s,repsDone:parseInt(val)||0}:s);
-    setLog({...log,sets:newSets});
+    const nl={...log,sets:newSets,allDone:newSets.every(s=>s.done)};
+    setLog(nl);
+    await DB.saveExerciseLog(user.uid,ex.id,today,nl);
   }
 
   async function changeSets(delta){
     const ns=Math.max(1,localSets+delta);
     setLocalSets(ns);
     const newSets=Array.from({length:ns},(_,i)=>(log && log.sets ? log.sets[i] : null)||{reps:localReps,done:false,repsDone:localReps});
-    const nl={...(log||{}),sets:newSets,allDone:false};
+    const nl={...(log||{}),sets:newSets,allDone:newSets.every(s=>s.done)};
     setLog(nl);
     await DB.saveExerciseLog(user.uid,ex.id,today,nl);
   }

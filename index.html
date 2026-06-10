@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>JuandaFit - Entrenador Personal</title>
 <!-- React -->
-<script defer src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script type="text/javascript" src="https://gc.kis.v2.scr.kaspersky-labs.com/FD126C42-EBFA-4E12-B309-BB3FDD723AC1/main.js?attr=0tjy8rMlt6YaUcnvt34ebEHb8C_uTp15YjD3PcYqk-2ZSyW7MAfRrH3UapuZ6M-CgO5vtC_d4hk8-IrO0Uq0cf5EX4qK1mOUgZzpb2HrIdMmbrgA0EWVadibztK6oJuzpybQ01UpvW7ReZ303SnV4V7Lna1phUnSr937bV9WWgxMm7nb25H_ZRONb4OdidGnMowykzzn751m9WbQzm7_3EG-mKBaW7SYGCq8vobDcn-_78zT7ELOS4sMbXtIgVAsTryADDyqMe07GiHSIAkPZtFN8udQ5hKMAA86eK1pkLTVUG203dRoSGJKqcp9R0mtn4elRkkfvQtITqB8bY5OCYZo2m5NP8OuAatqjoC6QOD66OAoQjbAKMiEcUlSNSWN" charset="UTF-8"></script><script defer src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script defer src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <!-- Firebase -->
 <script defer src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
@@ -247,7 +247,18 @@ const DB = {
   // ── Rutinas ──────────────────────────────────────────────────────────────────
   async getRoutine(uid){
     const snap = await db_fs.collection('routines').doc(uid).get();
-    return snap.exists ? (snap.data().days || {}) : {};
+    const days = snap.exists ? (snap.data().days || {}) : {};
+    // Ocultar ejercicios eliminados globalmente también dentro de rutinas ya guardadas.
+    try{
+      const deletedIds = await this.getDeletedExerciseIds();
+      if(deletedIds && deletedIds.length){
+        const deletedSet = new Set(deletedIds);
+        Object.keys(days).forEach(day=>{
+          if(Array.isArray(days[day])) days[day] = days[day].filter(ex=>ex && !deletedSet.has(ex.id));
+        });
+      }
+    }catch(e){ console.warn('getRoutine deleted filter error:', e); }
+    return days;
   },
 
   async getAllRoutines(uid){
@@ -300,6 +311,78 @@ const DB = {
 
   async saveExerciseInfo(exId, data){ return this.saveExInfo(exId, data); },
 
+  async getDeletedExerciseIds(){
+    let ids=[];
+    try{
+      const q = await db_fs.collection('exInfo').where('deleted','==',true).get();
+      ids = ids.concat(q.docs.map(d=>d.id));
+    }catch(e){ console.warn('getDeletedExerciseIds exInfo error:', e); }
+    try{
+      const q2 = await db_fs.collection('exerciseCatalog').where('deleted','==',true).get();
+      ids = ids.concat(q2.docs.map(d=>d.id));
+    }catch(e){ console.warn('getDeletedExerciseIds exerciseCatalog error:', e); }
+    try{
+      const local = JSON.parse(localStorage.getItem('jf_deleted_exercises')||'[]');
+      if(Array.isArray(local)) ids = ids.concat(local);
+    }catch(e){}
+    return Array.from(new Set(ids.filter(Boolean)));
+  },
+
+  watchDeletedExercises(cb){
+    const emitLocal = ()=>{
+      try{
+        const local = JSON.parse(localStorage.getItem('jf_deleted_exercises')||'[]');
+        if(Array.isArray(local) && local.length) cb(local);
+      }catch(e){}
+    };
+    const unsubs=[];
+    try{
+      unsubs.push(db_fs.collection('exInfo').where('deleted','==',true).onSnapshot(snap=>{
+        cb(snap.docs.map(d=>d.id));
+      }, err=>console.warn('watchDeletedExercises exInfo error:', err)));
+    }catch(e){ console.warn('watchDeletedExercises exInfo setup error:', e); }
+    try{
+      unsubs.push(db_fs.collection('exerciseCatalog').where('deleted','==',true).onSnapshot(snap=>{
+        cb(snap.docs.map(d=>d.id));
+      }, err=>console.warn('watchDeletedExercises catalog error:', err)));
+    }catch(e){ console.warn('watchDeletedExercises catalog setup error:', e); }
+    emitLocal();
+    return function(){ unsubs.forEach(fn=>{try{fn();}catch(e){}}); };
+  },
+
+  async deleteExerciseFromApp(exercise){
+    const id = typeof exercise === 'string' ? exercise : (exercise && exercise.id);
+    if(!id) throw new Error('Ejercicio inválido.');
+    const ex = typeof exercise === 'string' ? {id} : (exercise||{});
+    const deletedBy = (auth && auth.currentUser && auth.currentUser.uid) || ex.deletedBy || '';
+    const tombstone = {
+      id,
+      name: ex.name || '',
+      category: ex.category || '',
+      deleted: true,
+      deletedAt: Date.now(),
+      deletedBy
+    };
+
+    // El tombstone en exInfo es clave: permite ocultar también ejercicios nativos del HTML.
+    await db_fs.collection('exInfo').doc(id).set(tombstone, {merge:true});
+
+    // Si era un ejercicio creado por el entrenador, también se retira del catálogo global.
+    try{ await db_fs.collection('exerciseCatalog').doc(id).delete(); }
+    catch(e){ console.warn('deleteExerciseFromApp exerciseCatalog delete:', e); }
+
+    try{
+      const local = JSON.parse(localStorage.getItem('jf_custom_exercises')||'[]').filter(x=>x&&x.id!==id);
+      localStorage.setItem('jf_custom_exercises', JSON.stringify(local));
+      const deleted = JSON.parse(localStorage.getItem('jf_deleted_exercises')||'[]');
+      if(Array.isArray(deleted) && !deleted.includes(id)){
+        deleted.push(id);
+        localStorage.setItem('jf_deleted_exercises', JSON.stringify(deleted));
+      }
+    }catch(e){}
+    return true;
+  },
+
   // ── Biblioteca global de ejercicios personalizados ─────────────────────────────
   async getCustomExercises(){
     let items=[];
@@ -328,7 +411,7 @@ const DB = {
     }catch(e){}
 
     const seen={};
-    return items.filter(x=>x&&x.id&&!seen[x.id]&&(seen[x.id]=true));
+    return items.filter(x=>x&&x.id&&!x.deleted&&!seen[x.id]&&(seen[x.id]=true));
   },
 
   async saveCustomExercise(exercise, info){
@@ -377,7 +460,7 @@ const DB = {
       return db_fs.collection('exerciseCatalog')
         .where('global','==',true)
         .onSnapshot(snap=>{
-          cb(snap.docs.map(d=>({id:d.id,...d.data()})));
+          cb(snap.docs.map(d=>({id:d.id,...d.data()})).filter(x=>!x.deleted));
         }, err=>console.warn('watchCustomExercises error:', err));
     }catch(e){
       console.warn('watchCustomExercises setup error:', e);
@@ -836,10 +919,25 @@ function exColor(exId){
 function getCategoryOptions(){
   return Object.keys(CAT).filter(k=>Array.isArray(CAT[k]));
 }
+const DELETED_EXERCISES = {};
+function isExerciseDeleted(id){ return !!(id && DELETED_EXERCISES[id]); }
+function removeExerciseFromCatalogLocal(id){
+  if(!id)return;
+  Object.keys(CAT).forEach(cat=>{
+    if(Array.isArray(CAT[cat])) CAT[cat] = CAT[cat].filter(ex=>ex && ex.id!==id);
+  });
+}
+function applyDeletedExerciseIds(ids){
+  if(!Array.isArray(ids))return;
+  ids.filter(Boolean).forEach(id=>{
+    DELETED_EXERCISES[id]=true;
+    removeExerciseFromCatalogLocal(id);
+  });
+}
 function mergeCustomExercises(customs){
   if(!Array.isArray(customs))return;
   customs.forEach(raw=>{
-    if(!raw || !raw.id || !raw.name)return;
+    if(!raw || !raw.id || !raw.name || raw.deleted || isExerciseDeleted(raw.id))return;
     const cat = raw.category || raw.cat || getCategoryOptions()[0];
     if(!cat || !CAT[cat])return;
     const ex = {
@@ -2394,13 +2492,19 @@ function DayEditTrainer({user:u,trainer,day,exercises,notes,onBack,onSave,onUpda
   const [newExOpen,setNewExOpen]=useState(false);
   const [newExDraft,setNewExDraft]=useState(defaultNewExerciseDraft());
   const [savingNewEx,setSavingNewEx]=useState(false);
+  const [deletingExId,setDeletingExId]=useState(null);
 
-  // Load global custom exercise catalog and keep it synced for all trainers
+  // Load global custom exercise catalog and global deletions; keep them synced for all trainers.
   useEffect(()=>{
     let mounted=true;
+    function bump(){ if(mounted)setCatalogVersion(v=>v+1); }
     function applyCatalog(customs){
       mergeCustomExercises(customs||[]);
-      if(mounted)setCatalogVersion(v=>v+1);
+      bump();
+    }
+    function applyDeleted(ids){
+      applyDeletedExerciseIds(ids||[]);
+      bump();
     }
     async function loadCustomCatalog(){
       try{
@@ -2410,9 +2514,23 @@ function DayEditTrainer({user:u,trainer,day,exercises,notes,onBack,onSave,onUpda
         console.warn('custom exercise catalog error:', e);
       }
     }
+    async function loadDeletedCatalog(){
+      try{
+        const ids = await DB.getDeletedExerciseIds();
+        applyDeleted(ids);
+      }catch(e){
+        console.warn('deleted exercise catalog error:', e);
+      }
+    }
+    loadDeletedCatalog();
     loadCustomCatalog();
-    const unsub = DB.watchCustomExercises(applyCatalog);
-    return ()=>{mounted=false; if(typeof unsub==='function')unsub();};
+    const unsubCustom = DB.watchCustomExercises(applyCatalog);
+    const unsubDeleted = DB.watchDeletedExercises(applyDeleted);
+    return ()=>{
+      mounted=false;
+      if(typeof unsubCustom==='function')unsubCustom();
+      if(typeof unsubDeleted==='function')unsubDeleted();
+    };
   },[]);
 
   // Load exInfo for all exercises in this day
@@ -2533,6 +2651,26 @@ function DayEditTrainer({user:u,trainer,day,exercises,notes,onBack,onSave,onUpda
     setSavingNewEx(false);
   }
 
+  async function deleteExerciseFromApp(ex){
+    if(!ex || !ex.id)return;
+    const msg = '¿Eliminar "'+(ex.name||ex.id)+'" del catálogo global de la app?\n\nDesaparecerá para entrenadores y clientes al volver a cargar/entrar. Si estaba en esta rutina, también se quitará aquí.';
+    if(!confirm(msg))return;
+    setDeletingExId(ex.id);
+    try{
+      await DB.deleteExerciseFromApp(ex);
+      applyDeletedExerciseIds([ex.id]);
+      setExInfoCache(c=>{ const n={...c}; delete n[ex.id]; return n; });
+      onSetRtn(rtn=>Array.isArray(rtn)?rtn.filter(item=>item&&item.id!==ex.id):rtn);
+      if(exEditing===ex.id)setExEditing(null);
+      setCatalogVersion(v=>v+1);
+      alert('Ejercicio eliminado del catálogo global.');
+    }catch(e){
+      console.error('deleteExerciseFromApp error:', e);
+      alert('No se pudo eliminar el ejercicio: '+(e.message||'verifica conexión y permisos de Firestore'));
+    }
+    setDeletingExId(null);
+  }
+
   return React.createElement('div',{className:'scr'},
     React.createElement('div',{className:'wfc-top'},React.createElement('div',{className:'wfc-top-txt'},'JuandaFit')),
     React.createElement('div',{className:'hdr'},
@@ -2635,12 +2773,17 @@ function DayEditTrainer({user:u,trainer,day,exercises,notes,onBack,onSave,onUpda
                 )
               ),
               // Botones
-              React.createElement('div',{style:{display:'flex',gap:8}},
+              React.createElement('div',{style:{display:'flex',gap:8,flexWrap:'wrap'}},
                 React.createElement('button',{
                   onClick:saveExInfo,
                   disabled:savingEx,
-                  style:{flex:1,padding:'8px',borderRadius:10,border:'none',background:'linear-gradient(135deg,#00bcd4,#0097a7)',color:'#fff',fontWeight:700,fontSize:12,cursor:'pointer'}
+                  style:{flex:1,minWidth:110,padding:'8px',borderRadius:10,border:'none',background:'linear-gradient(135deg,#00bcd4,#0097a7)',color:'#fff',fontWeight:700,fontSize:12,cursor:'pointer'}
                 },savingEx?'Guardando...':'Guardar'),
+                React.createElement('button',{
+                  onClick:()=>deleteExerciseFromApp(ex),
+                  disabled:deletingExId===ex.id,
+                  style:{flex:1,minWidth:125,padding:'8px',borderRadius:10,border:'1px solid #ef444455',background:'#3d0d0d',color:'#ef4444',fontWeight:800,fontSize:12,cursor:'pointer'}
+                },deletingExId===ex.id?'Eliminando...':'Eliminar de la app'),
                 React.createElement('button',{
                   onClick:()=>setExEditing(null),
                   style:{padding:'8px 14px',borderRadius:10,border:'1px solid #1e4a6a',background:'transparent',color:'#7aadbe',fontSize:12,cursor:'pointer'}
@@ -2725,6 +2868,11 @@ function DayEditTrainer({user:u,trainer,day,exercises,notes,onBack,onSave,onUpda
                 ),
                 React.createElement('span',{style:{flex:1,fontSize:12,fontWeight:inRtn?700:500,color:inRtn?catColor(cat):'#e2f7fb'}},ex.name),
                 ex.custom&&React.createElement('span',{style:{fontSize:9,color:'#f59e0b',fontWeight:800,marginRight:4}},'NUEVO'),
+                React.createElement('button',{
+                  onClick:e=>{e.stopPropagation();deleteExerciseFromApp(ex);},
+                  disabled:deletingExId===ex.id,
+                  style:{padding:'4px 7px',borderRadius:6,border:'1px solid #ef444455',background:'#3d0d0d',color:'#ef4444',fontSize:10,fontWeight:800,cursor:'pointer'}
+                },deletingExId===ex.id?'...':'Borrar'),
                 React.createElement('span',{style:{color:inRtn?catColor(cat):'#00bcd4',fontWeight:700,fontSize:14}},inRtn?'✓':'+')
               );
             })

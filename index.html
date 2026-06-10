@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>JuandaFit - Entrenador Personal</title>
 <!-- React -->
-<script type="text/javascript" src="https://gc.kis.v2.scr.kaspersky-labs.com/FD126C42-EBFA-4E12-B309-BB3FDD723AC1/main.js?attr=0tjy8rMlt6YaUcnvt34ebEHb8C_uTp15YjD3PcYqk-2ZSyW7MAfRrH3UapuZ6M-CgO5vtC_d4hk8-IrO0Uq0cf5EX4qK1mOUgZzpb2HrIdMmbrgA0EWVadibztK6oJuzpybQ01UpvW7ReZ303SnV4V7Lna1phUnSr937bV9WWgxMm7nb25H_ZRONb4OdidGnMowykzzn751m9WbQzm7_3EG-mKBaW7SYGCq8vobDcn-_78zT7ELOS4sMbXtIgVAsTryADDyqMe07GiHSIAkPZtFN8udQ5hKMAA86eK1pkLTVUG203dRoSGJKqcp9R0mtn4elRkkfvQtITqB8bY5OCYZo2m5NP8OuAatqjoC6QOD66OAoQjbAKMiEcUlSNSWN" charset="UTF-8"></script><script defer src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script defer src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script defer src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <!-- Firebase -->
 <script defer src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
@@ -248,16 +248,17 @@ const DB = {
   async getRoutine(uid){
     const snap = await db_fs.collection('routines').doc(uid).get();
     const days = snap.exists ? (snap.data().days || {}) : {};
-    // Ocultar ejercicios eliminados globalmente también dentro de rutinas ya guardadas.
+    // Filtro rápido solo con caché local. No bloquea la carga consultando Firestore.
     try{
-      const deletedIds = await this.getDeletedExerciseIds();
-      if(deletedIds && deletedIds.length){
-        const deletedSet = new Set(deletedIds);
+      const localDeleted = (this.getDeletedExerciseIdsLocal ? this.getDeletedExerciseIdsLocal() : []);
+      if(localDeleted && localDeleted.length){
+        const deletedSet = new Set(localDeleted);
         Object.keys(days).forEach(day=>{
           if(Array.isArray(days[day])) days[day] = days[day].filter(ex=>ex && !deletedSet.has(ex.id));
         });
       }
-    }catch(e){ console.warn('getRoutine deleted filter error:', e); }
+      if(this.refreshDeletedExerciseIds) this.refreshDeletedExerciseIds();
+    }catch(e){}
     return days;
   },
 
@@ -311,43 +312,63 @@ const DB = {
 
   async saveExerciseInfo(exId, data){ return this.saveExInfo(exId, data); },
 
-  async getDeletedExerciseIds(){
-    let ids=[];
-    try{
-      const q = await db_fs.collection('exInfo').where('deleted','==',true).get();
-      ids = ids.concat(q.docs.map(d=>d.id));
-    }catch(e){ console.warn('getDeletedExerciseIds exInfo error:', e); }
-    try{
-      const q2 = await db_fs.collection('exerciseCatalog').where('deleted','==',true).get();
-      ids = ids.concat(q2.docs.map(d=>d.id));
-    }catch(e){ console.warn('getDeletedExerciseIds exerciseCatalog error:', e); }
+  getDeletedExerciseIdsLocal(){
     try{
       const local = JSON.parse(localStorage.getItem('jf_deleted_exercises')||'[]');
-      if(Array.isArray(local)) ids = ids.concat(local);
-    }catch(e){}
-    return Array.from(new Set(ids.filter(Boolean)));
+      return Array.isArray(local) ? Array.from(new Set(local.filter(Boolean))) : [];
+    }catch(e){ return []; }
+  },
+
+  cacheDeletedExerciseIds(ids){
+    try{
+      const clean = Array.from(new Set((ids||[]).filter(Boolean)));
+      localStorage.setItem('jf_deleted_exercises', JSON.stringify(clean));
+      if(typeof applyDeletedExerciseIds === 'function') applyDeletedExerciseIds(clean);
+      return clean;
+    }catch(e){ return ids||[]; }
+  },
+
+  async getDeletedExerciseIds(){
+    // Lectura ligera: un solo documento, no escaneo de colecciones.
+    const local = this.getDeletedExerciseIdsLocal();
+    try{
+      const snap = await db_fs.collection('appMeta').doc('deletedExercises').get();
+      const data = snap.exists ? (snap.data() || {}) : {};
+      const idsField = data.ids || {};
+      const remote = Array.isArray(idsField)
+        ? idsField
+        : Object.keys(idsField).filter(k=>idsField[k]);
+      return this.cacheDeletedExerciseIds(local.concat(remote));
+    }catch(e){
+      console.warn('getDeletedExerciseIds compact cache fallback:', e);
+      return local;
+    }
+  },
+
+  refreshDeletedExerciseIds(){
+    try{ this.getDeletedExerciseIds().catch(e=>console.warn('refreshDeletedExerciseIds:', e)); }catch(e){}
   },
 
   watchDeletedExercises(cb){
-    const emitLocal = ()=>{
-      try{
-        const local = JSON.parse(localStorage.getItem('jf_deleted_exercises')||'[]');
-        if(Array.isArray(local) && local.length) cb(local);
-      }catch(e){}
+    // Listener liviano: un solo documento global, no dos queries con where().
+    const emit = (ids)=>{
+      const clean = this.cacheDeletedExerciseIds(ids||[]);
+      if(typeof cb === 'function') cb(clean);
     };
-    const unsubs=[];
+    try{ emit(this.getDeletedExerciseIdsLocal()); }catch(e){}
     try{
-      unsubs.push(db_fs.collection('exInfo').where('deleted','==',true).onSnapshot(snap=>{
-        cb(snap.docs.map(d=>d.id));
-      }, err=>console.warn('watchDeletedExercises exInfo error:', err)));
-    }catch(e){ console.warn('watchDeletedExercises exInfo setup error:', e); }
-    try{
-      unsubs.push(db_fs.collection('exerciseCatalog').where('deleted','==',true).onSnapshot(snap=>{
-        cb(snap.docs.map(d=>d.id));
-      }, err=>console.warn('watchDeletedExercises catalog error:', err)));
-    }catch(e){ console.warn('watchDeletedExercises catalog setup error:', e); }
-    emitLocal();
-    return function(){ unsubs.forEach(fn=>{try{fn();}catch(e){}}); };
+      return db_fs.collection('appMeta').doc('deletedExercises').onSnapshot(snap=>{
+        const data = snap.exists ? (snap.data() || {}) : {};
+        const idsField = data.ids || {};
+        const ids = Array.isArray(idsField)
+          ? idsField
+          : Object.keys(idsField).filter(k=>idsField[k]);
+        emit(ids);
+      }, err=>console.warn('watchDeletedExercises compact error:', err));
+    }catch(e){
+      console.warn('watchDeletedExercises compact setup error:', e);
+      return function(){};
+    }
   },
 
   async deleteExerciseFromApp(exercise){
@@ -364,26 +385,37 @@ const DB = {
       deletedBy
     };
 
-    // El tombstone en exInfo es clave: permite ocultar también ejercicios nativos del HTML.
-    await db_fs.collection('exInfo').doc(id).set(tombstone, {merge:true});
+    // Documento compacto global para que todos oculten el ejercicio.
+    try{
+      await db_fs.collection('appMeta').doc('deletedExercises').set({
+        ids: {[id]: true},
+        updatedAt: Date.now()
+      }, {merge:true});
+    }catch(e){
+      console.warn('deleteExerciseFromApp appMeta:', e);
+    }
 
-    // Si era un ejercicio creado por el entrenador, también se retira del catálogo global.
+    // Tombstone compatible con versiones anteriores.
+    try{
+      await db_fs.collection('exInfo').doc(id).set(tombstone, {merge:true});
+    }catch(e){
+      console.warn('deleteExerciseFromApp exInfo:', e);
+    }
+
+    // Si era ejercicio creado por entrenador, se retira del catálogo global.
     try{ await db_fs.collection('exerciseCatalog').doc(id).delete(); }
     catch(e){ console.warn('deleteExerciseFromApp exerciseCatalog delete:', e); }
 
     try{
       const local = JSON.parse(localStorage.getItem('jf_custom_exercises')||'[]').filter(x=>x&&x.id!==id);
       localStorage.setItem('jf_custom_exercises', JSON.stringify(local));
-      const deleted = JSON.parse(localStorage.getItem('jf_deleted_exercises')||'[]');
-      if(Array.isArray(deleted) && !deleted.includes(id)){
-        deleted.push(id);
-        localStorage.setItem('jf_deleted_exercises', JSON.stringify(deleted));
-      }
+      const deleted = this.getDeletedExerciseIdsLocal();
+      if(!deleted.includes(id)) deleted.push(id);
+      this.cacheDeletedExerciseIds(deleted);
     }catch(e){}
     return true;
   },
 
-  // ── Biblioteca global de ejercicios personalizados ─────────────────────────────
   async getCustomExercises(){
     let items=[];
 

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>JuandaFit - Entrenador Personal</title>
 <!-- React -->
-<script defer src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script type="text/javascript" src="https://gc.kis.v2.scr.kaspersky-labs.com/FD126C42-EBFA-4E12-B309-BB3FDD723AC1/main.js?attr=iJ97wGZlma24_ybg8VcidDrMuzwhy7Wa6B6lZYUeh76Fw_u3njusl-DoWqLflnwiQluMC022zCHTW_xIqRu_sbo9-4C0-nnAuatLZs6X0WJiDkZQe1Ef2HAgLSmDRw2mwApHYPjl25rV5d9DIlly79zumfPD0R4S22Y0CGf6J0Q_hptwdjXM5BkOJZYLypGvHNxa0OT3y_t1KbmwvRX_5TCfEFYpfBVUreaer4IS4Cd9zRsoqX4TC5tb1zpl5_ELZLLE5dELw7chMSowZGFqFnHJy-ndoIvrjX890HX8YwFqUQePix1RKoDCZ0rLRerUv5p_C8vKgt8U9NlzDlGWXw" charset="UTF-8"></script><script defer src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script defer src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <!-- Firebase -->
 <script defer src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
@@ -66,6 +66,24 @@ html,body,#root{min-height:100%}
   padding:12px!important;
   background:#152535!important;
   border-top:1px solid #00bcd430!important;
+}
+
+
+/* Corrección notas/inputs: texto siempre visible sobre fondos oscuros */
+textarea,
+input,
+select,
+.inp{
+  color:#e2f7fb!important;
+  caret-color:#ffffff!important;
+}
+textarea::placeholder,
+input::placeholder{
+  color:#7aadbe!important;
+}
+.trainer-note-textarea{
+  color:#ffffff!important;
+  caret-color:#ffffff!important;
 }
 
 </style>
@@ -171,7 +189,7 @@ const DB = {
       uid, email: email.trim().toLowerCase(), name, tel: tel||'', role:'user',
       accessStatus:'active', accessReason:'',
       profileStatus:'pending', objetivo:'', frecuencia:'', peso:'',
-      estatura:'', edad:'', condicion:'', createdAt: Date.now()
+      estatura:'', imc:'', grasaVisceral:'', grasaCorporal:'', masaMuscular:'', edad:'', condicion:'', createdAt: Date.now()
     };
     await db_fs.collection('users').doc(uid).set(doc);
     return doc;
@@ -307,6 +325,10 @@ const DB = {
 
   async saveExInfo(exId, data){
     await db_fs.collection('exInfo').doc(exId).set(data, {merge: true});
+    // Si el ejercicio existe en el catálogo global creado por el entrenador, actualizarlo también.
+    try{
+      await db_fs.collection('exerciseCatalog').doc(exId).update({...data, updatedAt: Date.now()});
+    }catch(e){}
     return true;
   },
 
@@ -776,6 +798,8 @@ const CAT={
 ],
 };
 
+CAT["ESTIRAMIENTO"]=CAT["ESTIRAMIENTO"]||[];
+
 // ─── MuscleWiki URL slugs (todos verificados) ─────────────────────────────────
 const MW_URL={
   E001:"https://musclewiki.com/exercise/push-up",
@@ -941,7 +965,7 @@ const MW_URL={
 const ALL_EXERCISES = Object.values(CAT).filter(Array.isArray).flat();
 function getEx(id){return Object.values(CAT).filter(Array.isArray).flat().find(e=>e.id===id);}
 function catColor(cat){
-  const colors={'PECHO · HOMBRO · TRICEPS':'#ef4444','ESPALDA · BICEPS':'#3b82f6','PIERNA':'#22c55e','GLÚTEO':'#a855f7','PILAR · ESTABILIDAD':'#f59e0b','MOVILIDAD':'#06b6d4','CARDIO · VASCULAR':'#00bcd4'};
+  const colors={'PECHO · HOMBRO · TRICEPS':'#ef4444','ESPALDA · BICEPS':'#3b82f6','PIERNA':'#22c55e','GLÚTEO':'#a855f7','PILAR · ESTABILIDAD':'#f59e0b','MOVILIDAD':'#06b6d4','CARDIO · VASCULAR':'#00bcd4','ESTIRAMIENTO':'#14b8a6'};
   return colors[cat]||'#64748b';
 }
 function exColor(exId){
@@ -1003,6 +1027,10 @@ const IMG_PLACEHOLDER=window.JF_IMG_PLACEHOLDER||"";
 function getExerciseImage(ex, info){
   if(!ex)return null;
   return (info&&info.customImg) || ex.customImg || ex.image || EX_IMGS[ex.id] || null;
+}
+function getExerciseName(ex, info){
+  if(!ex)return '';
+  return (info&&info.name) || ex.name || '';
 }
 function compressImageFile(file, cb, onErr){
   if(!file)return;
@@ -1975,6 +2003,164 @@ function AvatarCircle({user,size=72,fontSize=28}){
   );
 }
 
+
+
+function BodyCompositionChart({user,compact=false}){
+  user=user||{};
+  function num(v){
+    if(v===null||v===undefined||v==='')return null;
+    const n=parseFloat((''+v).replace(',','.').replace('%',''));
+    return isNaN(n)?null:n;
+  }
+  function nice(n){
+    if(n===null&&n!==0)return '';
+    return (Math.round(n*10)/10).toString().replace('.',',');
+  }
+  function clamp(n,min,max){return Math.max(min,Math.min(max,n));}
+
+  const grasaCorporal=num(user.grasaCorporal!==undefined&&user.grasaCorporal!==''?user.grasaCorporal:user.porcentajeGrasa);
+  const masaMuscular=num(user.masaMuscular!==undefined&&user.masaMuscular!==''?user.masaMuscular:user.porcentajeMasa);
+  const imc=num(user.imc);
+  const grasaVisceral=num(user.grasaVisceral);
+
+  const hasPie=(grasaCorporal!==null)||(masaMuscular!==null);
+  const hasIndicators=(imc!==null)||(grasaVisceral!==null);
+  if(!hasPie&&!hasIndicators)return null;
+
+  let fat=grasaCorporal===null?0:clamp(grasaCorporal,0,100);
+  let muscle=masaMuscular===null?0:clamp(masaMuscular,0,100);
+  let rest=Math.max(0,100-fat-muscle);
+
+  // Si los porcentajes suman más de 100, se normalizan solo para el dibujo.
+  // Los valores reales se mantienen en la leyenda.
+  if(fat+muscle>100){
+    const scale=100/(fat+muscle);
+    fat=fat*scale;
+    muscle=muscle*scale;
+    rest=0;
+  }
+
+  const pieItems=[
+    {key:'grasaCorporal',label:'Grasa corporal',value:grasaCorporal,draw:fat,unit:'%',color:'#ff4d6d'},
+    {key:'masaMuscular',label:'Masa muscular',value:masaMuscular,draw:muscle,unit:'%',color:'#00e5ff'},
+    {key:'otros',label:'Otros componentes',value:Math.round(rest*10)/10,draw:rest,unit:'%',color:'#7c3aed'}
+  ].filter(x=>x.key==='otros'||x.value!==null);
+
+  let start=0;
+  const segments=pieItems.map(x=>{
+    const seg={...x,start,end:start+(x.draw||0)};
+    start+=(x.draw||0);
+    return seg;
+  });
+  const gradient=hasPie
+    ? 'conic-gradient('+segments.map(s=>`${s.color} ${s.start}% ${s.end}%`).join(', ')+')'
+    : 'conic-gradient(#1e3347 0 100%)';
+
+  function LegendItem({item}){
+    return React.createElement('div',{style:{
+      display:'grid',
+      gridTemplateColumns:'12px 1fr auto',
+      alignItems:'center',
+      gap:8,
+      background:'#0d2030',
+      border:'1px solid '+item.color+'55',
+      borderRadius:10,
+      padding:'8px 10px'
+    }},
+      React.createElement('span',{style:{width:12,height:12,borderRadius:'50%',background:item.color,boxShadow:'0 0 12px '+item.color}}),
+      React.createElement('div',null,
+        React.createElement('div',{style:{fontSize:11,color:'#e2f7fb',fontWeight:900,lineHeight:1.05}},item.label),
+        React.createElement('div',{style:{fontSize:9,color:'#7aadbe',fontWeight:700,marginTop:2}},
+          item.key==='otros'?'Porción restante del 100%':'Porcentaje ingresado'
+        )
+      ),
+      React.createElement('div',{style:{fontSize:14,color:'#ffffff',fontWeight:900}},
+        (item.value===null?'—':nice(item.value))+item.unit
+      )
+    );
+  }
+
+  function Indicator({label,value,color,sub}){
+    if(value===null&&value!==0)return null;
+    return React.createElement('div',{style:{
+      background:'#0d2030',
+      border:'1px solid '+color+'66',
+      borderRadius:12,
+      padding:'10px 12px',
+      display:'grid',
+      gridTemplateColumns:'12px 1fr auto',
+      alignItems:'center',
+      gap:8
+    }},
+      React.createElement('span',{style:{width:12,height:12,borderRadius:'50%',background:color,boxShadow:'0 0 12px '+color}}),
+      React.createElement('div',null,
+        React.createElement('div',{style:{fontSize:11,color:'#e2f7fb',fontWeight:900}},label),
+        React.createElement('div',{style:{fontSize:9,color:'#7aadbe',fontWeight:700,marginTop:2}},sub)
+      ),
+      React.createElement('div',{style:{fontSize:16,color:'#ffffff',fontWeight:900}},nice(value))
+    );
+  }
+
+  return React.createElement('div',{style:{
+      marginTop:14,
+      padding:'14px',
+      border:'1px solid #00bcd430',
+      borderRadius:16,
+      background:'#102638'
+    }},
+    React.createElement('div',{style:{fontSize:10,fontWeight:900,color:'#00e5ff',letterSpacing:'.12em',marginBottom:12}},'COMPOSICIÓN CORPORAL'),
+    hasPie&&React.createElement('div',{style:{display:'flex',gap:16,alignItems:'center',justifyContent:'flex-start',flexWrap:'wrap'}},
+      React.createElement('div',{style:{
+          position:'relative',
+          width:compact?132:154,
+          height:compact?132:154,
+          borderRadius:'50%',
+          background:gradient,
+          boxShadow:'0 0 28px #00bcd433',
+          flex:'0 0 auto'
+        }},
+        React.createElement('div',{style:{
+            position:'absolute',
+            inset:compact?23:27,
+            borderRadius:'50%',
+            background:'#152535',
+            display:'flex',
+            alignItems:'center',
+            justifyContent:'center',
+            flexDirection:'column',
+            border:'1px solid #00bcd440',
+            textAlign:'center'
+          }},
+          React.createElement('div',{style:{fontSize:compact?20:24,fontWeight:900,color:'#ffffff',lineHeight:1}},(grasaCorporal!==null?nice(grasaCorporal):'—')+'%'),
+          React.createElement('div',{style:{fontSize:9,color:'#7aadbe',fontWeight:800,lineHeight:1.1}},'grasa')
+        )
+      ),
+      React.createElement('div',{style:{
+          display:'grid',
+          gridTemplateColumns:compact?'1fr':'repeat(auto-fit,minmax(180px,1fr))',
+          gap:8,
+          flex:'1 1 260px',
+          minWidth:220
+        }},
+        pieItems.map(item=>React.createElement(LegendItem,{key:item.key,item}))
+      )
+    ),
+    hasIndicators&&React.createElement('div',{style:{
+        display:'grid',
+        gridTemplateColumns:'repeat(auto-fit,minmax(180px,1fr))',
+        gap:8,
+        marginTop:hasPie?12:0
+      }},
+      React.createElement(Indicator,{label:'IMC',value:imc,color:'#22c55e',sub:'Indicador calculado con peso y estatura'}),
+      React.createElement(Indicator,{label:'Grasa visceral',value:grasaVisceral,color:'#f59e0b',sub:'Indicador separado, no porcentaje de la torta'})
+    ),
+    React.createElement('div',{style:{fontSize:9,color:'#7aadbe',marginTop:10,lineHeight:1.35}},
+      'La torta usa solo porcentajes comparables: grasa corporal, masa muscular y otros componentes. IMC y grasa visceral se muestran aparte porque son indicadores, no partes del 100%.'
+    )
+  );
+}
+
+
 // READ-ONLY profile for regular users
 function ProfileScreen({user,onBack}){
   const objs=Array.isArray(user.objetivo)?user.objetivo:(user.objetivo?[user.objetivo]:[]);
@@ -2016,6 +2202,11 @@ function ProfileScreen({user,onBack}){
         React.createElement(Row,{label:'Sexo',value:user.sex}),
         React.createElement(Row,{label:'Peso',value:user.peso?(user.peso+' kg'):null}),
         React.createElement(Row,{label:'Estatura',value:user.estatura?(user.estatura+' cm'):null}),
+        React.createElement(Row,{label:'IMC',value:(user.imc||user.imc===0)?user.imc:null}),
+        React.createElement(Row,{label:'Grasa visceral',value:(user.grasaVisceral||user.grasaVisceral===0)?user.grasaVisceral:null}),
+        React.createElement(Row,{label:'Grasa corporal',value:(user.grasaCorporal||user.grasaCorporal===0)?(user.grasaCorporal+'%'):((user.porcentajeGrasa||user.porcentajeGrasa===0)?(user.porcentajeGrasa+'%'):null)}),
+        React.createElement(Row,{label:'Masa muscular',value:(user.masaMuscular||user.masaMuscular===0)?(user.masaMuscular+'%'):((user.porcentajeMasa||user.porcentajeMasa===0)?(user.porcentajeMasa+'%'):null)}),
+        React.createElement(BodyCompositionChart,{user}),
         React.createElement(Row,{label:'Condición',value:user.cond&&user.cond!=='No aplica'?user.cond:null}),
         React.createElement(Row,{label:'Frecuencia',value:user.frecuencia}),
         React.createElement(Row,{label:'Inicio rutina',value:user.fechaInicio}),
@@ -2376,13 +2567,14 @@ function UserFicha({user:u,trainer,onBack}){
       React.createElement('div',{className:'card',style:{marginBottom:10}},
         React.createElement('div',{style:{fontSize:10,fontWeight:900,color:'#7aadbe',letterSpacing:'.08em',marginBottom:8}},'MEDIDAS'),
         React.createElement('div',{style:{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}},
-          [['PESO (kg)','peso','number','70'],['ESTATURA (cm)','estatura','number','175']].map(([lbl,key,type,ph])=>
+          [['PESO (kg)','peso','number','70'],['ESTATURA (cm)','estatura','number','175'],['IMC','imc','number','24.5'],['GRASA VISCERAL','grasaVisceral','number','8'],['GRASA CORPORAL (%)','grasaCorporal','number','18'],['MASA MUSCULAR (%)','masaMuscular','number','42']].map(([lbl,key,type,ph])=>
             React.createElement('div',{key},
               React.createElement('div',{className:'label'},lbl),
               React.createElement('input',{className:'inp',type,value:pDraft[key]||'',onChange:e=>setPDraft(d=>({...d,[key]:e.target.value})),placeholder:ph,style:{fontSize:12}})
             )
           )
-        )
+        ),
+        React.createElement(BodyCompositionChart,{user:pDraft||u,compact:true})
       ),
       // Objectives (multi-select)
       React.createElement('div',{className:'card',style:{marginBottom:10}},
@@ -2449,7 +2641,7 @@ function UserFicha({user:u,trainer,onBack}){
           )
         ),
         // Profile info
-        [['Edad',u.age],['Frecuencia',u.frecuencia],['Peso',u.peso?(u.peso+' kg'):null],['Estatura',u.estatura?(u.estatura+' cm'):null],['Condición',u.cond&&u.cond!=='No aplica'?u.cond:null]].filter(f=>f[1]).map(([l,v])=>
+        [['Edad',u.age],['Frecuencia',u.frecuencia],['Peso',u.peso?(u.peso+' kg'):null],['Estatura',u.estatura?(u.estatura+' cm'):null],['IMC',(u.imc||u.imc===0)?u.imc:null],['Grasa visceral',(u.grasaVisceral||u.grasaVisceral===0)?u.grasaVisceral:null],['Grasa corporal',(u.grasaCorporal||u.grasaCorporal===0)?(u.grasaCorporal+'%'):((u.porcentajeGrasa||u.porcentajeGrasa===0)?(u.porcentajeGrasa+'%'):null)],['Masa muscular',(u.masaMuscular||u.masaMuscular===0)?(u.masaMuscular+'%'):((u.porcentajeMasa||u.porcentajeMasa===0)?(u.porcentajeMasa+'%'):null)],['Condición',u.cond&&u.cond!=='No aplica'?u.cond:null]].filter(f=>f[1]).map(([l,v])=>
           React.createElement('div',{key:l,style:{display:'flex',justifyContent:'space-between',padding:'4px 0',borderTop:'1px solid #1e3347'}},
             React.createElement('span',{style:{fontSize:11,color:'#7aadbe'}},l),
             React.createElement('span',{style:{fontSize:11,color:'#e2f7fb',fontWeight:700}},v)
@@ -2610,7 +2802,7 @@ function DayEditTrainer({user:u,trainer,day,exercises,notes,onBack,onSave,onUpda
       });
       if(info.link)links.push({url:info.link,label:info.linkLabel||'Enlace del entrenador'});
     }
-    setExInfoDraft({links,description:info?info.description||'':'',customImg:(info&&info.customImg)||baseEx.customImg||''});
+    setExInfoDraft({name:(info&&info.name)||baseEx.name||'',links,description:info?info.description||'':'',customImg:(info&&info.customImg)||baseEx.customImg||''});
     setExEditing(exId);
   }
 
@@ -2618,9 +2810,13 @@ function DayEditTrainer({user:u,trainer,day,exercises,notes,onBack,onSave,onUpda
     setSavingEx(true);
     try{
       const cleanLinks=(exInfoDraft.links||[]).filter(l=>l.url&&l.url.trim());
-      const dataToSave={links:cleanLinks,description:exInfoDraft.description||'',customImg:exInfoDraft.customImg||''};
+      const baseEx=(exercises.find(e=>e.id===exEditing)||{});
+      const dataToSave={name:(exInfoDraft.name||'').trim()||baseEx.name||'',links:cleanLinks,description:exInfoDraft.description||'',customImg:exInfoDraft.customImg||''};
       await DB.saveExInfo(exEditing,dataToSave);
       setExInfoCache(c=>({...c,[exEditing]:{...dataToSave}}));
+      onSetRtn(rtn=>Array.isArray(rtn)?rtn.map(item=>item&&item.id===exEditing?{...item,name:dataToSave.name||item.name}:item):rtn);
+      mergeCustomExercises([{...baseEx,...dataToSave,id:exEditing,category:baseEx.category||baseEx.cat}]);
+      setCatalogVersion(v=>v+1);
       setExEditing(null);
     }catch(e){
       console.error('saveExInfo error:',e);
@@ -2729,7 +2925,7 @@ function DayEditTrainer({user:u,trainer,day,exercises,notes,onBack,onSave,onUpda
               getExerciseImage(ex,exInfoCache[ex.id])?React.createElement('img',{loading:'lazy',decoding:'async',src:getExerciseImage(ex,exInfoCache[ex.id]),style:{width:'100%',height:'100%',objectFit:'contain'}}):React.createElement('img',{loading:'lazy',decoding:'async',src:IMG_PLACEHOLDER,style:{width:'100%',height:'100%',objectFit:'contain',opacity:0.4}})
             ),
             React.createElement('div',{style:{flex:1}},
-              React.createElement('div',{style:{fontWeight:700,fontSize:13,color:'#e2f7fb'}},ex.name),
+              React.createElement('div',{style:{fontWeight:700,fontSize:13,color:'#e2f7fb'}},getExerciseName(ex,exInfoCache[ex.id])),
               // Series/reps controls
               React.createElement('div',{style:{display:'flex',gap:6,marginTop:5,alignItems:'center'}},
                 React.createElement('div',{style:{display:'flex',alignItems:'center',gap:4,background:'#152535',border:'1px solid '+trainer.color+'44',borderRadius:7,padding:'2px 6px'}},
@@ -2752,6 +2948,15 @@ function DayEditTrainer({user:u,trainer,day,exercises,notes,onBack,onSave,onUpda
             React.createElement('div',{style:{padding:'10px 12px',borderTop:'1px solid #1e3347',background:'#0d1b2a'}},
               React.createElement('div',{style:{fontSize:10,fontWeight:900,color:'#00bcd4',letterSpacing:'.08em',marginBottom:8}},'INFO GLOBAL DEL EJERCICIO'),
               React.createElement('div',{style:{fontSize:11,color:'#7aadbe',marginBottom:10}},'Aplica para todos los clientes con este ejercicio.'),
+              React.createElement('div',{style:{marginBottom:10}},
+                React.createElement('div',{style:{fontSize:10,fontWeight:700,color:'#7aadbe',marginBottom:4}},'NOMBRE DEL EJERCICIO'),
+                React.createElement('input',{
+                  value:exInfoDraft.name||'',
+                  onChange:e=>setExInfoDraft(d=>({...d,name:e.target.value})),
+                  placeholder:'Nombre del ejercicio',
+                  style:{width:'100%',padding:'8px',borderRadius:8,border:'1.5px solid #00bcd430',background:'#152535',fontSize:12,color:'#e2f7fb',boxSizing:'border-box',display:'block'}
+                })
+              ),
               React.createElement('div',{style:{marginBottom:10}},
                 React.createElement('div',{style:{fontSize:10,fontWeight:700,color:'#7aadbe',marginBottom:4}},'IMAGEN DEL EJERCICIO'),
                 exInfoDraft.customImg&&React.createElement('img',{loading:'lazy',decoding:'async',src:exInfoDraft.customImg,style:{width:70,height:70,objectFit:'contain',borderRadius:10,background:'#152535',border:'1px solid #1e4a6a',marginBottom:6}}),
@@ -2838,7 +3043,7 @@ function DayEditTrainer({user:u,trainer,day,exercises,notes,onBack,onSave,onUpda
           noteEditing===ex.id?
             React.createElement('div',{style:{padding:'0 12px 10px',borderTop:'1px solid #1e3347'}},
               React.createElement('div',{style:{fontSize:9,color:trainer.color,fontWeight:700,marginBottom:4}},'Nota del entrenador:'),
-              React.createElement('textarea',{value:noteDraft,onChange:e=>setNoteDraft(e.target.value),rows:3,placeholder:'Instrucciones para este ejercicio...',style:{width:'100%',padding:'6px 8px',borderRadius:7,border:'1.5px solid '+trainer.color,background:'#0d1b2a',fontSize:11,boxSizing:'border-box',display:'block'}}),
+              React.createElement('textarea',{value:noteDraft,onChange:e=>setNoteDraft(e.target.value),rows:3,placeholder:'Instrucciones para este ejercicio...',style:{width:'100%',padding:'6px 8px',borderRadius:7,border:'1.5px solid '+trainer.color,background:'#0d1b2a',fontSize:11,color:'#ffffff',caretColor:'#ffffff',boxSizing:'border-box',display:'block'}}),
               React.createElement('div',{style:{display:'flex',gap:6,marginTop:5}},
                 React.createElement('button',{onClick:async()=>{await onSaveNote(ex.id,noteDraft);setNoteEditing(null);},style:{flex:1,padding:'6px',borderRadius:6,background:trainer.color,border:'none',color:'#fff',fontWeight:700,fontSize:11,cursor:'pointer'}},'Guardar nota'),
                 React.createElement('button',{onClick:()=>setNoteEditing(null),style:{padding:'6px 10px',borderRadius:6,background:'transparent',border:'1px solid #1e4a6a',color:'#7aadbe',fontSize:11,cursor:'pointer'}},'Cancelar')
@@ -2898,7 +3103,7 @@ function DayEditTrainer({user:u,trainer,day,exercises,notes,onBack,onSave,onUpda
                 React.createElement('div',{style:{width:36,height:36,borderRadius:6,background:catColor(cat)+'22',border:'1px solid '+catColor(cat)+'33',overflow:'hidden',flexShrink:0,display:'flex',alignItems:'center',justifyContent:'center',fontSize:9,fontWeight:900,color:catColor(cat)}},
                   getExerciseImage(ex)?React.createElement('img',{loading:'lazy',decoding:'async',src:getExerciseImage(ex),style:{width:'100%',height:'100%',objectFit:'contain'}}):React.createElement('img',{loading:'lazy',decoding:'async',src:IMG_PLACEHOLDER,style:{width:'100%',height:'100%',objectFit:'contain',opacity:0.4}})
                 ),
-                React.createElement('span',{style:{flex:1,fontSize:12,fontWeight:inRtn?700:500,color:inRtn?catColor(cat):'#e2f7fb'}},ex.name),
+                React.createElement('span',{style:{flex:1,fontSize:12,fontWeight:inRtn?700:500,color:inRtn?catColor(cat):'#e2f7fb'}},getExerciseName(ex,null)),
                 ex.custom&&React.createElement('span',{style:{fontSize:9,color:'#f59e0b',fontWeight:800,marginRight:4}},'NUEVO'),
                 React.createElement('button',{
                   onClick:e=>{e.stopPropagation();deleteExerciseFromApp(ex);},

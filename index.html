@@ -115,6 +115,7 @@ const DB = {
     const uid = cred.user.uid;
     const doc = {
       uid, email: email.trim().toLowerCase(), name, tel: tel||'', role:'user',
+      accessStatus:'active', accessReason:'',
       profileStatus:'pending', objetivo:'', frecuencia:'', peso:'',
       estatura:'', edad:'', condicion:'', createdAt: Date.now()
     };
@@ -245,6 +246,91 @@ const DB = {
 
   async saveExerciseInfo(exId, data){ return this.saveExInfo(exId, data); },
 
+  // ── Biblioteca global de ejercicios personalizados ─────────────────────────────
+  async getCustomExercises(){
+    let items=[];
+
+    // Fuente principal: catálogo global. Lo que se cree aquí aparece para todos
+    // los entrenadores/clientes que carguen el catálogo.
+    try{
+      const q = await db_fs.collection('exerciseCatalog').where('global','==',true).get();
+      items = items.concat(q.docs.map(d=>({id:d.id,...d.data()})));
+    }catch(e){
+      console.warn('getCustomExercises exerciseCatalog error:', e);
+    }
+
+    // Compatibilidad con versiones anteriores que guardaban los ejercicios en exInfo.
+    try{
+      const q2 = await db_fs.collection('exInfo').where('isCustomExercise','==',true).get();
+      items = items.concat(q2.docs.map(d=>({id:d.id,...d.data()})));
+    }catch(e){
+      console.warn('getCustomExercises exInfo legacy error:', e);
+    }
+
+    // Fallback local solo para que el creador vea lo recién creado si hay latencia.
+    try{
+      const local = JSON.parse(localStorage.getItem('jf_custom_exercises')||'[]');
+      if(Array.isArray(local))items = items.concat(local);
+    }catch(e){}
+
+    const seen={};
+    return items.filter(x=>x&&x.id&&!seen[x.id]&&(seen[x.id]=true));
+  },
+
+  async saveCustomExercise(exercise, info){
+    const now=Date.now();
+    const payload = {
+      ...exercise,
+      ...info,
+      id: exercise.id,
+      name: exercise.name || info.name || '',
+      category: exercise.category || info.category || '',
+      zone: exercise.zone || info.zone || 'Personalizado',
+      machine: exercise.machine || info.machine || 'Personalizado',
+      video: exercise.video || info.video || '',
+      customImg: exercise.customImg || info.customImg || info.image || '',
+      global: true,
+      isGlobalExercise: true,
+      isCustomExercise: true,
+      custom: true,
+      createdAt: info.createdAt || now,
+      updatedAt: now
+    };
+
+    // Guardado global del catálogo: todos leen de aquí.
+    // Si las reglas de Firestore aún no permiten esta colección nueva, no se rompe:
+    // exInfo queda como respaldo global compatible con la versión anterior.
+    try{
+      await db_fs.collection('exerciseCatalog').doc(payload.id).set(payload, {merge:true});
+    }catch(e){
+      console.warn('saveCustomExercise exerciseCatalog fallback to exInfo:', e);
+    }
+
+    // Guardado paralelo de info del ejercicio: descripción, imagen y links usados
+    // por ExerciseScreen, por la edición global existente y como respaldo global.
+    await db_fs.collection('exInfo').doc(payload.id).set(payload, {merge:true});
+
+    try{
+      const local = JSON.parse(localStorage.getItem('jf_custom_exercises')||'[]').filter(x=>x&&x.id!==payload.id);
+      local.push(payload);
+      localStorage.setItem('jf_custom_exercises', JSON.stringify(local));
+    }catch(e){}
+    return payload;
+  },
+
+  watchCustomExercises(cb){
+    try{
+      return db_fs.collection('exerciseCatalog')
+        .where('global','==',true)
+        .onSnapshot(snap=>{
+          cb(snap.docs.map(d=>({id:d.id,...d.data()})));
+        }, err=>console.warn('watchCustomExercises error:', err));
+    }catch(e){
+      console.warn('watchCustomExercises setup error:', e);
+      return function(){};
+    }
+  },
+
   // ── Solicitudes de ayuda ──────────────────────────────────────────────────────
   async postHelp(data){
     await db_fs.collection('helpRequests').doc(data.userId).set({
@@ -331,7 +417,16 @@ const DB = {
   // ── Stubs compatibilidad ──────────────────────────────────────────────────────
   async updateActivity(uid, name){ return true; },
   async getActivity(){ return []; },
-  watchUserProfile(uid, cb){ return function(){}; },
+  watchUserProfile(uid, cb){
+    try{
+      return db_fs.collection('users').doc(uid).onSnapshot(snap=>{
+        if(snap.exists && typeof cb==='function') cb(snap.data());
+      }, err=>console.warn('watchUserProfile error:', err));
+    }catch(e){
+      console.warn('watchUserProfile setup error:', e);
+      return function(){};
+    }
+  },
   watchNote(uid, exId, cb){ return function(){}; },
   watchExInfo(exId, cb){ return function(){}; },
   watchMachineStatus(id, cb){ return function(){}; },
@@ -675,7 +770,7 @@ const MW_URL={
 // Flatten exercises
 
 const ALL_EXERCISES = Object.values(CAT).filter(Array.isArray).flat();
-function getEx(id){return ALL_EXERCISES.find(e=>e.id===id);}
+function getEx(id){return Object.values(CAT).filter(Array.isArray).flat().find(e=>e.id===id);}
 function catColor(cat){
   const colors={'PECHO · HOMBRO · TRICEPS':'#ef4444','ESPALDA · BICEPS':'#3b82f6','PIERNA':'#22c55e','GLÚTEO':'#a855f7','PILAR · ESTABILIDAD':'#f59e0b','MOVILIDAD':'#06b6d4','CARDIO · VASCULAR':'#00bcd4'};
   return colors[cat]||'#64748b';
@@ -683,6 +778,33 @@ function catColor(cat){
 function exColor(exId){
   for(const [cat,exs] of Object.entries(CAT)){ if(Array.isArray(exs) && exs.find(e=>e.id===exId)) return catColor(cat); }
   return '#64748b';
+}
+function getCategoryOptions(){
+  return Object.keys(CAT).filter(k=>Array.isArray(CAT[k]));
+}
+function mergeCustomExercises(customs){
+  if(!Array.isArray(customs))return;
+  customs.forEach(raw=>{
+    if(!raw || !raw.id || !raw.name)return;
+    const cat = raw.category || raw.cat || getCategoryOptions()[0];
+    if(!cat || !CAT[cat])return;
+    const ex = {
+      id: raw.id,
+      name: raw.name,
+      zone: raw.zone || 'Personalizado',
+      machine: raw.machine || 'Personalizado',
+      video: raw.video || (raw.links&&raw.links[0]&&raw.links[0].url) || '',
+      category: cat,
+      custom: true,
+      customImg: raw.customImg || raw.image || ''
+    };
+    const idx = CAT[cat].findIndex(e=>e.id===ex.id);
+    if(idx>=0)CAT[cat][idx]={...CAT[cat][idx],...ex};
+    else CAT[cat].push(ex);
+  });
+}
+function defaultNewExerciseDraft(){
+  return {name:'',category:getCategoryOptions()[0]||'',image:'',link:'',description:''};
 }
 
 // ─── LOGO ─────────────────────────────────────────────────────────────────────
@@ -694,10 +816,53 @@ const LOGO_SRC="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAukAAAMQCAYAAACaLv
 
 const IMG_PLACEHOLDER='data:image/png;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/4gHYSUNDX1BST0ZJTEUAAQEAAAHIAAAAAAQwAABtbnRyUkdCIFhZWiAH4AABAAEAAAAAAABhY3NwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAA9tYAAQAAAADTLQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAlkZXNjAAAA8AAAACRyWFlaAAABFAAAABRnWFlaAAABKAAAABRiWFlaAAABPAAAABR3dHB0AAABUAAAABRyVFJDAAABZAAAAChnVFJDAAABZAAAAChiVFJDAAABZAAAAChjcHJ0AAABjAAAADxtbHVjAAAAAAAAAAEAAAAMZW5VUwAAAAgAAAAcAHMAUgBHAEJYWVogAAAAAAAAb6IAADj1AAADkFhZWiAAAAAAAABimQAAt4UAABjaWFlaIAAAAAAAACSgAAAPhAAAts9YWVogAAAAAAAA9tYAAQAAAADTLXBhcmEAAAAAAAQAAAACZmYAAPKnAAANWQAAE9AAAApbAAAAAAAAAABtbHVjAAAAAAAAAAEAAAAMZW5VUwAAACAAAAAcAEcAbwBvAGcAbABlACAASQBuAGMALgAgADIAMAAxADb/2wBDAAUDBAQEAwUEBAQFBQUGBwwIBwcHBw8LCwkMEQ8SEhEPERETFhwXExQaFRERGCEYGh0dHx8fExciJCIeJBweHx7/2wBDAQUFBQcGBw4ICA4eFBEUHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh7/wAARCAPUBEUDASIAAhEBAxEB/8QAHAABAAMBAQEBAQAAAAAAAAAAAAMHCAYCBAUB/8QAQBABAAECAQYHDwQCAwADAAAAAAIDBQQGBxJBYpMBCBQiNnSyERYXMjM0QlRVVnFzkrPCN0NS0hMkFXKiJUSC/8QAFAEBAAAAAAAAAAAAAAAAAAAAAP/EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAMAwEAAhEDEQA/ANYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAkp6wp6wEYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJKesKGsBGAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACSnrCnrARgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAkp6wp6wEYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJKesKesBGAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACShrCnrARgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAkoawp6wEYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJKGsKesBGAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACSnrChrARgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAkp6wp6wEYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJKesKGsBGAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACSnrChrARgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAkp6woawEYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJKGsKGsBGAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACSnrChrARgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAkoawp6wEYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJKGsKesBGAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA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AAAAAAAAAAAAAAAAAAAAAAAAAAkp6woawEYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJKesKesBGAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACShrCnrARgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAkp6woawEYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJKesKesBGAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACShrChrARgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAkp6woawEYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJKGsKGsBGAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACSnrCnrARgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAkp6woawEYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJKesKesBGAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACShrChrARgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAkoawoawEYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJKGsKesBGAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACSnrCnrARgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAkp6woawEYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJKesKGsBGAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACShrCnrARgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAkp6wp6wEYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJKGsAH//2Q==';
 
+function getExerciseImage(ex, info){
+  if(!ex)return null;
+  return (info&&info.customImg) || ex.customImg || ex.image || EX_IMGS[ex.id] || null;
+}
+function compressImageFile(file, cb, onErr){
+  if(!file)return;
+  const reader = new FileReader();
+  reader.onerror = ()=>{ if(onErr)onErr(); };
+  reader.onload = ()=>{
+    const img = new Image();
+    img.onerror = ()=>cb(reader.result);
+    img.onload = ()=>{
+      try{
+        const max = 700;
+        let w = img.width || max, h = img.height || max;
+        if(w>h && w>max){ h = Math.round(h*max/w); w = max; }
+        else if(h>=w && h>max){ w = Math.round(w*max/h); h = max; }
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img,0,0,w,h);
+        cb(canvas.toDataURL('image/jpeg',0.76));
+      }catch(e){ cb(reader.result); }
+    };
+    img.src = reader.result;
+  };
+  reader.readAsDataURL(file);
+}
+
 function getTrainerTheme(idx){ return {color:'#00bcd4',light:'#152535'}; }
 const DAY_KEYS = ["lun","mar","mie","jue","vie","sab","dom"];
 const DAY_LABELS = {lun:"Lunes",mar:"Martes",mie:"Miercoles",jue:"Jueves",vie:"Viernes",sab:"Sabado",dom:"Domingo"};
 const DAY_SHORT = {lun:"L",mar:"M",mie:"Mi",jue:"J",vie:"V",sab:"S",dom:"D"};
+
+function isAccessBlocked(user){
+  return !!(user && (user.accessStatus==='blocked' || user.accessBlocked===true || user.paymentStatus==='blocked' || user.paymentStatus==='overdue'));
+}
+function getAccessStatus(user){
+  return isAccessBlocked(user) ? 'blocked' : 'active';
+}
+function accessBadgeStyle(user){
+  const blocked=isAccessBlocked(user);
+  return {display:'inline-flex',alignItems:'center',gap:4,borderRadius:999,padding:'3px 8px',fontSize:9,fontWeight:900,letterSpacing:'.04em',background:blocked?'#ef444420':'#16a34a20',border:'1px solid '+(blocked?'#ef444455':'#16a34a55'),color:blocked?'#fca5a5':'#86efac'};
+}
+function accessLabel(user){
+  return isAccessBlocked(user)?'ACCESO BLOQUEADO':'ACCESO ACTIVO';
+}
 
 // ─── ERROR BOUNDARY ──────────────────────────────────────────────────────────
 class ErrorBoundary extends React.Component {
@@ -731,6 +896,25 @@ function App(){
   const [authReady, setAuthReady] = useState(false);
   const [user, setUser] = useState(null);
   const [trainer, setTrainer] = useState(null);
+
+  // Cargar el catálogo global al iniciar la app. Así los ejercicios creados por
+  // el entrenador existen como biblioteca común, no solo dentro de una rutina.
+  useEffect(()=>{
+    let mounted=true;
+    async function loadGlobalExerciseCatalog(){
+      try{
+        const customs = await DB.getCustomExercises();
+        if(mounted) mergeCustomExercises(customs);
+      }catch(e){
+        console.warn('global exercise catalog load error:', e);
+      }
+    }
+    loadGlobalExerciseCatalog();
+    const unsub = DB.watchCustomExercises(customs=>{
+      if(mounted) mergeCustomExercises(customs||[]);
+    });
+    return ()=>{mounted=false; if(typeof unsub==='function')unsub();};
+  },[]);
 
   useEffect(()=>{
     // Restaurar sesión: Firebase Auth para usuarios, localStorage para trainer
@@ -788,7 +972,13 @@ function App(){
   const efectiveScr = (navScr && !trainer && !user) ? navScr : scr;
 
   // Real-time profile listener — actualiza sin cerrar sesión
-  
+  useEffect(()=>{
+    if(!user || !user.uid) return;
+    const unsub = DB.watchUserProfile(user.uid, data=>{
+      setUser(prev=>prev?{...prev,...data}:data);
+    });
+    return ()=>{ if(typeof unsub==='function') unsub(); };
+  },[user&&user.uid]);
 
   // Activity ping
   useEffect(()=>{
@@ -807,7 +997,7 @@ function App(){
 
   if(efectiveScr==='splash') return React.createElement(Splash);
   if(efectiveScr==='trainer') return React.createElement(TrainerPanel,{trainer,onLogout:logout});
-  if(efectiveScr==='home')    return React.createElement(HomeScreen,{user,onLogout:logout});
+  if(efectiveScr==='home')    return React.createElement(HomeScreen,{user,onLogout:logout,updateUser:setUser});
   if(efectiveScr==='login')   return React.createElement(LoginScreen,{onBack:()=>_setNavScr(null),onLogin:(tr,u)=>{if(tr){setTrainer(tr);setUser(null);}else{setUser(u);setTrainer(null);}}});
   if(efectiveScr==='trainer_login') return React.createElement(TrainerLoginScreen,{onBack:()=>_setNavScr(null),onLogin:(tr,u)=>{if(tr){setTrainer(tr);setUser(null);}else{setUser(u);setTrainer(null);}}});
   // choose
@@ -1055,6 +1245,33 @@ function TrainerLoginScreen({onBack, onLogin}){
 
 
 
+function AccessBlockedScreen({user,onLogout,onProfile}){
+  return React.createElement('div',{className:'scr'},
+    React.createElement('div',{className:'wfc-top'},React.createElement('div',{className:'wfc-top-txt'},'JuandaFit')),
+    React.createElement('div',{className:'hdr'},
+      React.createElement('div',null,
+        React.createElement('div',{style:{fontWeight:800,fontSize:14,color:'#ef4444'}},'Acceso restringido'),
+        React.createElement('div',{style:{fontSize:11,color:'#a8cdd8'}},user.name||user.email||'Usuario')
+      ),
+      React.createElement('button',{onClick:onLogout,style:{background:'transparent',border:'1px solid #1e4a6a',borderRadius:8,padding:'6px 12px',fontSize:12,color:'#7aadbe',cursor:'pointer'}},'Salir')
+    ),
+    React.createElement('div',{className:'scrollable',style:{padding:18,background:'#0d1b2a',display:'flex',alignItems:'center',justifyContent:'center'}},
+      React.createElement('div',{className:'card',style:{maxWidth:420,width:'100%',textAlign:'center',border:'1.5px solid #ef444455',boxShadow:'0 0 24px #ef444415'}},
+        React.createElement('div',{style:{fontSize:46,marginBottom:10}},'🔒'),
+        React.createElement('div',{style:{fontSize:20,fontWeight:900,color:'#e2f7fb',marginBottom:8}},'Tu acceso está temporalmente restringido'),
+        React.createElement('div',{style:{fontSize:13,color:'#a8cdd8',lineHeight:1.6,marginBottom:14}},
+          user.accessReason || 'Comunícate con tu entrenador para reactivar tu acceso al plan de entrenamiento.'
+        ),
+        React.createElement('div',{style:{background:'#ef444415',border:'1px solid #ef444440',borderRadius:12,padding:'10px',fontSize:11,color:'#fca5a5',fontWeight:700,marginBottom:14}},
+          'Mientras el acceso esté bloqueado no podrás ver ni completar rutinas.'
+        ),
+        React.createElement('button',{className:'btn btn-secondary',onClick:onProfile,style:{marginBottom:10}},'Ver mi perfil'),
+        React.createElement('button',{className:'btn btn-primary',onClick:onLogout,style:{background:'#ef4444'}},'Salir')
+      )
+    )
+  );
+}
+
 // ─── HOME SCREEN ──────────────────────────────────────────────────────────────
 function HomeScreen({user,onNav,onLogout,updateUser}){
   const [scr,setScr]=useState('home');
@@ -1078,6 +1295,7 @@ function HomeScreen({user,onNav,onLogout,updateUser}){
   function refresh(){setVer(v=>v+1);}
 
   if(scr==='profile') return React.createElement(ProfileScreen,{user,onBack:()=>setScr('home')});
+  if(isAccessBlocked(user)) return React.createElement(AccessBlockedScreen,{user,onLogout,onProfile:()=>setScr('profile')});
   if(scr==='training'&&selDay) return React.createElement(TrainingScreen,{user,day:selDay,routines,weekAtt,onBack:()=>{setScr('home');refresh();},onSelectEx:ex=>{setSelEx(ex);setScr('exercise');}});
   if(scr==='exercise'&&selEx&&selDay) return React.createElement(ExerciseScreen,{user,day:selDay,exercise:selEx,routine:routines[selDay]||[],onBack:()=>{setScr('training');refresh();}});
 
@@ -1261,8 +1479,8 @@ function TrainingScreen({user,day,routines,weekAtt,onBack,onSelectEx}){
               overflow:'hidden',
               display:'flex',alignItems:'center',justifyContent:'center'
             }},
-              EX_IMGS[ex.id]?
-                React.createElement('img',{src:EX_IMGS[ex.id],style:{width:'100%',height:'100%',objectFit:'contain'}}):
+              getExerciseImage(ex)?
+                React.createElement('img',{src:getExerciseImage(ex),style:{width:'100%',height:'100%',objectFit:'contain'}}):
                 React.createElement('img',{src:IMG_PLACEHOLDER,style:{width:'100%',height:'100%',objectFit:'contain',opacity:0.3}})
             ),
             React.createElement('div',{style:{textAlign:'center'}},
@@ -1409,8 +1627,8 @@ function ExerciseScreen({user,day,exercise:ex,routine,onBack}){
         borderLeft:'4px solid '+c
       }},
         React.createElement('div',{style:{width:72,height:72,borderRadius:14,overflow:'hidden',background:'#0d1b2a',flexShrink:0,display:'flex',alignItems:'center',justifyContent:'center',border:'1px solid '+c+'33'}},
-          (exInfo&&exInfo.customImg)||EX_IMGS[ex.id]?
-            React.createElement('img',{src:(exInfo&&exInfo.customImg)||EX_IMGS[ex.id],style:{width:'100%',height:'100%',objectFit:'contain'}}):
+          getExerciseImage(ex,exInfo)?
+            React.createElement('img',{src:getExerciseImage(ex,exInfo),style:{width:'100%',height:'100%',objectFit:'contain'}}):
             React.createElement('img',{src:IMG_PLACEHOLDER,style:{width:'100%',height:'100%',objectFit:'contain',opacity:0.4}})
         ),
         React.createElement('div',{style:{flex:1}},
@@ -1617,7 +1835,8 @@ function ProfileScreen({user,onBack}){
         React.createElement(Row,{label:'Condición',value:user.cond&&user.cond!=='No aplica'?user.cond:null}),
         React.createElement(Row,{label:'Frecuencia',value:user.frecuencia}),
         React.createElement(Row,{label:'Inicio rutina',value:user.fechaInicio}),
-        React.createElement(Row,{label:'Cambio rutina',value:user.fechaCambio})
+        React.createElement(Row,{label:'Cambio rutina',value:user.fechaCambio}),
+        React.createElement(Row,{label:'Estado de acceso',value:isAccessBlocked(user)?'Restringido':'Activo'})
       ),
       // Objectives (multi)
       objs.length>0&&React.createElement('div',{className:'card',style:{marginTop:10}},
@@ -1642,7 +1861,10 @@ function UserCard({u, onSelect, onDelete, deleting}){
       React.createElement(AvatarCircle,{user:u,size:40}),
       React.createElement('div',{style:{flex:1}},
         React.createElement('div',{style:{fontWeight:700,color:'#e2f7fb',fontSize:14}},u.name||u.email),
-        React.createElement('div',{style:{fontSize:11,color:'#7aadbe',marginTop:2}},u.email)
+        React.createElement('div',{style:{fontSize:11,color:'#7aadbe',marginTop:2}},u.email),
+        React.createElement('div',{style:{marginTop:5}},
+          React.createElement('span',{style:accessBadgeStyle(u)},accessLabel(u))
+        )
       ),
       React.createElement('span',{style:{color:'#00bcd4',fontSize:18}},'›')
     ),
@@ -1833,7 +2055,7 @@ function UserFicha({user:u,trainer,onBack}){
 
   async function saveProfile(){
     setSavingProfile(true);
-    const dataToSave={...pDraft,profileStatus:'active'};
+    const dataToSave={...pDraft,profileStatus:'active',accessStatus:getAccessStatus(pDraft),accessBlocked:isAccessBlocked(pDraft),accessUpdatedAt:Date.now()};
     // Trainer token enforced — 'trainer' role check in DB helper
     await DB.saveUserProfile(u.uid||u.email,dataToSave,trainer);
     setSavingProfile(false);
@@ -1989,6 +2211,30 @@ function UserFicha({user:u,trainer,onBack}){
           })
         )
       ),
+      // Access control
+      React.createElement('div',{className:'card',style:{marginBottom:10,border:'1.5px solid '+(isAccessBlocked(pDraft)?'#ef444455':'#16a34a44')}},
+        React.createElement('div',{style:{fontSize:10,fontWeight:900,color:'#7aadbe',letterSpacing:'.08em',marginBottom:8}},'CONTROL DE ACCESO'),
+        React.createElement('div',{style:{fontSize:11,color:'#a8cdd8',lineHeight:1.5,marginBottom:10}},
+          'Usa esta opción cuando el cliente no haya pagado o deba pausar temporalmente el servicio. Si está bloqueado, podrá entrar a su cuenta, pero no podrá ver ni completar rutinas.'
+        ),
+        React.createElement('div',{style:{display:'flex',gap:8,marginBottom:10}},
+          [
+            {id:'active',label:'Activo',desc:'Puede entrenar'},
+            {id:'blocked',label:'Bloqueado',desc:'Sin acceso a rutinas'}
+          ].map(opt=>{
+            const sel=getAccessStatus(pDraft)===opt.id;
+            const color=opt.id==='blocked'?'#ef4444':'#16a34a';
+            return React.createElement('button',{key:opt.id,onClick:()=>setPDraft(d=>({...d,accessStatus:opt.id,accessBlocked:opt.id==='blocked'})),style:{flex:1,padding:'10px 8px',borderRadius:10,border:'2px solid '+(sel?color:'#1e4a6a'),background:sel?color+'20':'transparent',color:sel?color:'#a8cdd8',fontWeight:800,fontSize:12,cursor:'pointer'}},
+              React.createElement('div',null,opt.id==='blocked'?'🔒 ':'✅ ',opt.label),
+              React.createElement('div',{style:{fontSize:9,fontWeight:600,opacity:.85,marginTop:2}},opt.desc)
+            );
+          })
+        ),
+        isAccessBlocked(pDraft)&&React.createElement('div',{style:{marginBottom:8}},
+          React.createElement('div',{className:'label'},'MENSAJE PARA EL CLIENTE (opcional)'),
+          React.createElement('textarea',{className:'inp',rows:2,value:pDraft.accessReason||'',placeholder:'Ej.: Tu acceso está pausado. Comunícate con tu entrenador para reactivarlo.',onChange:e=>setPDraft(d=>({...d,accessReason:e.target.value})),style:{fontSize:12,minHeight:64}})
+        )
+      ),
       // Dates
       React.createElement('div',{className:'card',style:{marginBottom:16}},
         React.createElement('div',{style:{fontSize:10,fontWeight:900,color:'#7aadbe',letterSpacing:'.08em',marginBottom:8}},'FECHAS'),
@@ -2014,7 +2260,8 @@ function UserFicha({user:u,trainer,onBack}){
           React.createElement('div',null,
             React.createElement('div',{style:{fontWeight:900,fontSize:16,color:'#e2f7fb'}},u.name),
             React.createElement('div',{style:{fontSize:12,color:u.status==='activo'?'#22c55e':u.status==='warning'?'#eab308':'#94a3b8',fontWeight:600}},
-              u.status==='activo'?'Activo ahora':u.status==='warning'?'Actividad reciente':'⚪ Inactivo')
+              u.status==='activo'?'Activo ahora':u.status==='warning'?'Actividad reciente':'⚪ Inactivo'),
+            React.createElement('div',{style:{marginTop:5}},React.createElement('span',{style:accessBadgeStyle(pDraft)},accessLabel(pDraft)))
           )
         ),
         // Profile info
@@ -2065,7 +2312,7 @@ function UserFicha({user:u,trainer,onBack}){
           exs.length===0&&React.createElement('div',{style:{padding:'10px 12px',fontSize:12,color:'#7aadbe'}},'Sin ejercicios asignados'),
           exs.map((ex,ei)=>React.createElement('div',{key:ex.id,style:{display:'flex',alignItems:'center',gap:10,padding:'8px 12px',borderTop:'1px solid #1e3347'}},
             React.createElement('div',{style:{width:36,height:36,borderRadius:8,background:exColor(ex.id)+'22',border:'1px solid '+exColor(ex.id)+'33',overflow:'hidden',flexShrink:0,display:'flex',alignItems:'center',justifyContent:'center',fontSize:10,fontWeight:900,color:exColor(ex.id)}},
-              EX_IMGS[ex.id]?React.createElement('img',{src:EX_IMGS[ex.id],style:{width:'100%',height:'100%',objectFit:'contain'}}):React.createElement('img',{src:IMG_PLACEHOLDER,style:{width:'100%',height:'100%',objectFit:'contain',opacity:0.4}})
+              getExerciseImage(ex)?React.createElement('img',{src:getExerciseImage(ex),style:{width:'100%',height:'100%',objectFit:'contain'}}):React.createElement('img',{src:IMG_PLACEHOLDER,style:{width:'100%',height:'100%',objectFit:'contain',opacity:0.4}})
             ),
             React.createElement('div',{style:{flex:1}},
               React.createElement('div',{style:{fontWeight:700,fontSize:12,color:'#e2f7fb'}},ex.name),
@@ -2089,6 +2336,30 @@ function DayEditTrainer({user:u,trainer,day,exercises,notes,onBack,onSave,onUpda
   const [exEditErr,setExEditErr]=useState(''); // error al abrir/guardar info ejerciciobal info (links: [{url,label}])
   const [exInfoCache,setExInfoCache]=useState({}); // exId -> info from Firestore
   const [savingEx,setSavingEx]=useState(false);
+  const [catalogVersion,setCatalogVersion]=useState(0);
+  const [newExOpen,setNewExOpen]=useState(false);
+  const [newExDraft,setNewExDraft]=useState(defaultNewExerciseDraft());
+  const [savingNewEx,setSavingNewEx]=useState(false);
+
+  // Load global custom exercise catalog and keep it synced for all trainers
+  useEffect(()=>{
+    let mounted=true;
+    function applyCatalog(customs){
+      mergeCustomExercises(customs||[]);
+      if(mounted)setCatalogVersion(v=>v+1);
+    }
+    async function loadCustomCatalog(){
+      try{
+        const customs = await DB.getCustomExercises();
+        applyCatalog(customs);
+      }catch(e){
+        console.warn('custom exercise catalog error:', e);
+      }
+    }
+    loadCustomCatalog();
+    const unsub = DB.watchCustomExercises(applyCatalog);
+    return ()=>{mounted=false; if(typeof unsub==='function')unsub();};
+  },[]);
 
   // Load exInfo for all exercises in this day
   useEffect(()=>{
@@ -2135,7 +2406,7 @@ function DayEditTrainer({user:u,trainer,day,exercises,notes,onBack,onSave,onUpda
       });
       if(info.link)links.push({url:info.link,label:info.linkLabel||'Enlace del entrenador'});
     }
-    setExInfoDraft({links,description:info?info.description||'':''});
+    setExInfoDraft({links,description:info?info.description||'':'',customImg:(info&&info.customImg)||baseEx.customImg||''});
     setExEditing(exId);
   }
 
@@ -2143,7 +2414,7 @@ function DayEditTrainer({user:u,trainer,day,exercises,notes,onBack,onSave,onUpda
     setSavingEx(true);
     try{
       const cleanLinks=(exInfoDraft.links||[]).filter(l=>l.url&&l.url.trim());
-      const dataToSave={links:cleanLinks,description:exInfoDraft.description||''};
+      const dataToSave={links:cleanLinks,description:exInfoDraft.description||'',customImg:exInfoDraft.customImg||''};
       await DB.saveExInfo(exEditing,dataToSave);
       setExInfoCache(c=>({...c,[exEditing]:{...dataToSave}}));
       setExEditing(null);
@@ -2158,6 +2429,54 @@ function DayEditTrainer({user:u,trainer,day,exercises,notes,onBack,onSave,onUpda
   function addEx(ex){
     if(exercises.find(e=>e.id===ex.id)){onSetRtn(rtn=>rtn.filter(e=>e.id!==ex.id));return;}
     onSetRtn(rtn=>[...rtn,{...ex,sets:3,reps:10,rest:60}]);
+  }
+
+  function handleNewExerciseImageFile(file){
+    if(!file)return;
+    compressImageFile(file, dataUrl=>setNewExDraft(d=>({...d,image:dataUrl})), ()=>alert('No se pudo cargar la imagen.'));
+  }
+
+  function handleEditExerciseImageFile(file){
+    if(!file)return;
+    compressImageFile(file, dataUrl=>setExInfoDraft(d=>({...d,customImg:dataUrl})), ()=>alert('No se pudo cargar la imagen.'));
+  }
+
+  async function createNewExercise(){
+    const name=(newExDraft.name||'').trim();
+    const category=newExDraft.category;
+    if(!name){ alert('Escribe el nombre del ejercicio.'); return; }
+    if(!category || !CAT[category]){ alert('Selecciona una categoría válida.'); return; }
+    setSavingNewEx(true);
+    try{
+      const id='C'+Date.now().toString(36).toUpperCase()+Math.random().toString(36).slice(2,6).toUpperCase();
+      const link=(newExDraft.link||'').trim();
+      const image=(newExDraft.image||'').trim();
+      const ex={
+        id, name, category, custom:true, customImg:image,
+        zone:'Personalizado', machine:'Personalizado', video:link
+      };
+      const info={
+        ...ex,
+        isCustomExercise:true,
+        links:link?[{url:link,label:'Tutorial principal'}]:[],
+        description:(newExDraft.description||'').trim(),
+        createdBy:(trainer&&trainer.uid)||(trainer&&trainer.email)||'',
+        createdAt:Date.now()
+      };
+      await DB.saveCustomExercise(ex,info);
+      mergeCustomExercises([info]);
+      setExInfoCache(c=>({...c,[id]:info}));
+      setCatalogVersion(v=>v+1);
+      setOpenCat(category);
+      setNewExDraft(defaultNewExerciseDraft());
+      setNewExOpen(false);
+      setTab('add');
+      alert('Ejercicio creado en el catálogo global. Para asignarlo, selecciónalo en la categoría correspondiente y luego guarda la rutina del cliente.');
+    }catch(e){
+      console.error('createNewExercise error:',e);
+      alert('Error al crear el ejercicio: '+(e.message||'verifica conexión'));
+    }
+    setSavingNewEx(false);
   }
 
   return React.createElement('div',{className:'scr'},
@@ -2183,7 +2502,7 @@ function DayEditTrainer({user:u,trainer,day,exercises,notes,onBack,onSave,onUpda
           // Exercise header
           React.createElement('div',{style:{display:'flex',alignItems:'center',gap:10,padding:'10px 12px'}},
             React.createElement('div',{style:{width:40,height:40,borderRadius:8,background:exColor(ex.id)+'22',border:'1px solid '+exColor(ex.id)+'33',overflow:'hidden',flexShrink:0,display:'flex',alignItems:'center',justifyContent:'center',fontSize:11,fontWeight:900,color:exColor(ex.id)}},
-              EX_IMGS[ex.id]?React.createElement('img',{src:EX_IMGS[ex.id],style:{width:'100%',height:'100%',objectFit:'contain'}}):React.createElement('img',{src:IMG_PLACEHOLDER,style:{width:'100%',height:'100%',objectFit:'contain',opacity:0.4}})
+              getExerciseImage(ex,exInfoCache[ex.id])?React.createElement('img',{src:getExerciseImage(ex,exInfoCache[ex.id]),style:{width:'100%',height:'100%',objectFit:'contain'}}):React.createElement('img',{src:IMG_PLACEHOLDER,style:{width:'100%',height:'100%',objectFit:'contain',opacity:0.4}})
             ),
             React.createElement('div',{style:{flex:1}},
               React.createElement('div',{style:{fontWeight:700,fontSize:13,color:'#e2f7fb'}},ex.name),
@@ -2209,6 +2528,17 @@ function DayEditTrainer({user:u,trainer,day,exercises,notes,onBack,onSave,onUpda
             React.createElement('div',{style:{padding:'10px 12px',borderTop:'1px solid #1e3347',background:'#0d1b2a'}},
               React.createElement('div',{style:{fontSize:10,fontWeight:900,color:'#00bcd4',letterSpacing:'.08em',marginBottom:8}},'INFO GLOBAL DEL EJERCICIO'),
               React.createElement('div',{style:{fontSize:11,color:'#7aadbe',marginBottom:10}},'Aplica para todos los clientes con este ejercicio.'),
+              React.createElement('div',{style:{marginBottom:10}},
+                React.createElement('div',{style:{fontSize:10,fontWeight:700,color:'#7aadbe',marginBottom:4}},'IMAGEN DEL EJERCICIO'),
+                exInfoDraft.customImg&&React.createElement('img',{src:exInfoDraft.customImg,style:{width:70,height:70,objectFit:'contain',borderRadius:10,background:'#152535',border:'1px solid #1e4a6a',marginBottom:6}}),
+                React.createElement('input',{
+                  value:exInfoDraft.customImg||'',
+                  onChange:e=>setExInfoDraft(d=>({...d,customImg:e.target.value})),
+                  placeholder:'URL de imagen o usa el botón de archivo',
+                  style:{width:'100%',padding:'8px',borderRadius:8,border:'1.5px solid #00bcd430',background:'#152535',fontSize:12,color:'#e2f7fb',boxSizing:'border-box',display:'block',marginBottom:6}
+                }),
+                React.createElement('input',{type:'file',accept:'image/*',onChange:e=>handleEditExerciseImageFile(e.target.files&&e.target.files[0]),style:{fontSize:11,color:'#7aadbe',width:'100%'}})
+              ),
               // Descripción
               React.createElement('div',{style:{marginBottom:10}},
                 React.createElement('div',{style:{fontSize:10,fontWeight:700,color:'#7aadbe',marginBottom:4}},'DESCRIPCIÓN'),
@@ -2297,7 +2627,34 @@ function DayEditTrainer({user:u,trainer,day,exercises,notes,onBack,onSave,onUpda
         exercises.length>0&&React.createElement('button',{className:'btn btn-primary',onClick:onSave,style:{marginTop:8}},'Guardar rutina')
       ),
       tab==='add'&&React.createElement('div',null,
-        Object.entries(CAT).filter(([,exsList])=>Array.isArray(exsList)).map(([cat,exsList])=>React.createElement('div',{key:cat,style:{marginBottom:8}},
+        React.createElement('div',{className:'card',style:{border:'1.5px solid '+trainer.color+'55',marginBottom:12}},
+          React.createElement('div',{onClick:()=>setNewExOpen(!newExOpen),style:{display:'flex',justifyContent:'space-between',alignItems:'center',cursor:'pointer'}},
+            React.createElement('div',null,
+              React.createElement('div',{style:{fontSize:13,fontWeight:900,color:'#e2f7fb'}},'Crear ejercicio global'),
+              React.createElement('div',{style:{fontSize:11,color:'#7aadbe',marginTop:2}},'Quedará disponible en el catálogo global; no se asigna automáticamente')
+            ),
+            React.createElement('span',{style:{color:trainer.color,fontSize:18,fontWeight:900}},newExOpen?'−':'+')
+          ),
+          newExOpen&&React.createElement('div',{style:{marginTop:12,borderTop:'1px solid #1e3347',paddingTop:12}},
+            React.createElement('label',{className:'label'},'Nombre del ejercicio'),
+            React.createElement('input',{className:'inp',value:newExDraft.name,onChange:e=>setNewExDraft(d=>({...d,name:e.target.value})),placeholder:'Ej: Press Arnold unilateral',style:{marginBottom:10}}),
+            React.createElement('label',{className:'label'},'Categoría'),
+            React.createElement('select',{className:'inp',value:newExDraft.category,onChange:e=>setNewExDraft(d=>({...d,category:e.target.value})),style:{marginBottom:10}},
+              getCategoryOptions().map(cat=>React.createElement('option',{key:cat,value:cat},cat))
+            ),
+            React.createElement('label',{className:'label'},'Imagen'),
+            newExDraft.image&&React.createElement('img',{src:newExDraft.image,style:{width:82,height:82,objectFit:'contain',borderRadius:12,background:'#0d1b2a',border:'1px solid #1e4a6a',marginBottom:8}}),
+            React.createElement('input',{className:'inp',value:newExDraft.image,onChange:e=>setNewExDraft(d=>({...d,image:e.target.value})),placeholder:'URL de imagen o sube un archivo',style:{marginBottom:6}}),
+            React.createElement('input',{type:'file',accept:'image/*',onChange:e=>handleNewExerciseImageFile(e.target.files&&e.target.files[0]),style:{fontSize:11,color:'#7aadbe',width:'100%',marginBottom:10}}),
+            React.createElement('label',{className:'label'},'Link de tutorial'),
+            React.createElement('input',{className:'inp',value:newExDraft.link,onChange:e=>setNewExDraft(d=>({...d,link:e.target.value})),placeholder:'https://...',style:{marginBottom:10}}),
+            React.createElement('label',{className:'label'},'Descripción opcional'),
+            React.createElement('textarea',{value:newExDraft.description,onChange:e=>setNewExDraft(d=>({...d,description:e.target.value})),rows:3,placeholder:'Indicaciones técnicas, postura, errores comunes...',style:{width:'100%',padding:'10px 12px',borderRadius:12,border:'1.5px solid #00bcd430',fontSize:13,color:'#e2f7fb',background:'#1a3347',outline:'none',boxSizing:'border-box',display:'block',marginBottom:12}}),
+            React.createElement('button',{className:'btn btn-primary',disabled:savingNewEx,onClick:createNewExercise},savingNewEx?'Creando...':'Crear ejercicio global')
+          )
+        ),
+        React.createElement('div',{style:{fontSize:10,fontWeight:900,color:'#7aadbe',letterSpacing:'.08em',margin:'6px 0 8px'}},'CATÁLOGO DE EJERCICIOS'),
+        Object.entries(CAT).filter(([,exsList])=>Array.isArray(exsList)).map(([cat,exsList])=>React.createElement('div',{key:cat+'-'+catalogVersion,style:{marginBottom:8}},
           React.createElement('div',{onClick:()=>setOpenCat(openCat===cat?null:cat),style:{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'10px 12px',background:'#152535',borderRadius:10,border:'1.5px solid '+(openCat===cat?catColor(cat):'#1e4a6a'),cursor:'pointer',marginBottom:openCat===cat?0:0}},
             React.createElement('div',{style:{display:'flex',alignItems:'center',gap:8}},
               React.createElement('div',{style:{width:8,height:8,borderRadius:'50%',background:catColor(cat)}}),
@@ -2308,11 +2665,12 @@ function DayEditTrainer({user:u,trainer,day,exercises,notes,onBack,onSave,onUpda
           openCat===cat&&React.createElement('div',{style:{background:'#152535',borderRadius:10,border:'1px solid #1e4a6a',overflow:'hidden',marginTop:4}},
             exsList.map(ex=>{
               const inRtn=!!exercises.find(e=>e.id===ex.id);
-              return React.createElement('div',{key:ex.id,onClick:()=>addEx(ex),style:{display:'flex',alignItems:'center',gap:10,padding:'10px 12px',borderBottom:'1px solid #1e3a4a',cursor:'pointer',background:inRtn?catColor(ex.id)+'10':'transparent'}},
+              return React.createElement('div',{key:ex.id,onClick:()=>addEx(ex),style:{display:'flex',alignItems:'center',gap:10,padding:'10px 12px',borderBottom:'1px solid #1e3a4a',cursor:'pointer',background:inRtn?catColor(cat)+'10':'transparent'}},
                 React.createElement('div',{style:{width:36,height:36,borderRadius:6,background:catColor(cat)+'22',border:'1px solid '+catColor(cat)+'33',overflow:'hidden',flexShrink:0,display:'flex',alignItems:'center',justifyContent:'center',fontSize:9,fontWeight:900,color:catColor(cat)}},
-                EX_IMGS[ex.id]?React.createElement('img',{src:EX_IMGS[ex.id],style:{width:'100%',height:'100%',objectFit:'contain'}}):React.createElement('img',{src:IMG_PLACEHOLDER,style:{width:'100%',height:'100%',objectFit:'contain',opacity:0.4}})
-              ),
+                  getExerciseImage(ex)?React.createElement('img',{src:getExerciseImage(ex),style:{width:'100%',height:'100%',objectFit:'contain'}}):React.createElement('img',{src:IMG_PLACEHOLDER,style:{width:'100%',height:'100%',objectFit:'contain',opacity:0.4}})
+                ),
                 React.createElement('span',{style:{flex:1,fontSize:12,fontWeight:inRtn?700:500,color:inRtn?catColor(cat):'#e2f7fb'}},ex.name),
+                ex.custom&&React.createElement('span',{style:{fontSize:9,color:'#f59e0b',fontWeight:800,marginRight:4}},'NUEVO'),
                 React.createElement('span',{style:{color:inRtn?catColor(cat):'#00bcd4',fontWeight:700,fontSize:14}},inRtn?'✓':'+')
               );
             })

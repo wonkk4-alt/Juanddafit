@@ -1635,6 +1635,8 @@ function TrainerLoginScreen({onBack, onLogin}){
     if(!pin||pin.length<3){setErr('Ingresa tu PIN');return;}
     setLoading(true);setErr('');
     try{
+      // 0. Asegurar que Firebase esté listo antes de usar db_fs
+      await ensureFirebaseReady();
       // 1. Verificar PIN en Firestore (lectura pública)
       const snap = await db_fs.collection('users').where('role','==','trainer').limit(1).get();
       if(snap.empty) throw new Error('No hay entrenador registrado.');

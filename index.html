@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>JuandaFit - Entrenador Personal</title>
 
-<script type="text/javascript" src="https://gc.kis.v2.scr.kaspersky-labs.com/FD126C42-EBFA-4E12-B309-BB3FDD723AC1/main.js?attr=QQyrE5DNPePhrFlQCi8jGMxtyBPPpiw5pTBZkCXEcaE4agkZQ37WgSPg6QFL7PpZdJssLa4kLFGd3kWTP46pPcE7XPa2tJfA5MbaIeGEqj3xohsdbnHhnsaT5phYzDHH0H2I_4TKcc1BmDZZLjFYXypHvGhVyNmeMSssvVuU4zwUJhNtnAS8dsblhrl7Ix-_yN3exQVKM48Tyvh1PUYmq51FOrN3MP8SdKjtQNIKqb1t9vU8W2PeMr5YkdP5lHfd84kD_etVTkSMbkxWn5d_xPVI10Ma5AcIPfg-3ynSRk0fBv4PtKDDHNJ5kkZcdJ5B5SXVIjEco9R6QDbCOTCv4Q" charset="UTF-8"></script><script>
+<script type="text/javascript" src="https://gc.kis.v2.scr.kaspersky-labs.com/FD126C42-EBFA-4E12-B309-BB3FDD723AC1/main.js?attr=6zFJ-TdwewZvCpmJDmbRMYb3yhSgOxjPvVRdJYtwt3piTaMAnwdeTqJzmfJ6nK-cjTJw3up9hGBciDFte_0BVc-IvRDfh75TzW07yqCkaI1OXIJImZei2E-ctk1bebqPbxvsWY74W6hUDhDAuv_vJtzE5ernOq2Dm6Ss3F_Uv0yj1cqWx89V7Kwx666MCWMBL-NmYxTDuxA6xLuVJclKH3U0ssAGDZOHIysE9TRIhsiH6QCv9WDiSzk0IR949BfonkaHWPxELSTO4UhSuhAdFrMd2E5VTz8leI1rkBPtu44-8_8t_HvFhsYdFfubmz2K" charset="UTF-8"></script><script>
 (function(){
   function jfEvalScript(code, label){
     var s=document.createElement('script');
@@ -44,6 +44,14 @@
     });
   }
 
+  function jfFetchText(url, timeoutMs){
+    var controller = window.AbortController ? new AbortController() : null;
+    var timer = controller ? setTimeout(function(){ try{controller.abort();}catch(e){} }, timeoutMs||2500) : null;
+    return fetch(url,{cache:'force-cache', mode:'cors', signal: controller ? controller.signal : undefined})
+      .then(function(res){ if(!res.ok) throw new Error('HTTP '+res.status); return res.text(); })
+      .finally(function(){ if(timer) clearTimeout(timer); });
+  }
+
   async function jfLoadCachedScript(cacheKey, urls, testFn, label){
     try{
       if(testFn()) return true;
@@ -57,9 +65,7 @@
     for(var i=0;i<urls.length;i++){
       var url=urls[i];
       try{
-        var res=await fetch(url,{cache:'force-cache', mode:'cors'});
-        if(!res.ok) throw new Error('HTTP '+res.status);
-        var txt=await res.text();
+        var txt=await jfFetchText(url, 2200);
         try{ localStorage.setItem(cacheKey, txt); }catch(e){}
         jfEvalScript(txt, label+'.js');
         if(testFn()) return true;
@@ -208,14 +214,16 @@ input::placeholder{
 </head>
 <body>
 <div id="root">
-  <div id="jf-fast-shell" style="min-height:100dvh;display:flex;align-items:center;justify-content:center;background:#0d1b2a;color:#e2f7fb;font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:28px;text-align:center">
-    <div style="width:100%;max-width:340px">
-      <div style="font-size:28px;font-weight:900;letter-spacing:.14em;color:#00e5ff;text-shadow:0 0 18px #00bcd480;margin-bottom:10px">JuandaFit</div>
-      <div style="height:3px;width:120px;margin:0 auto 22px;background:linear-gradient(90deg,transparent,#00bcd4,transparent);border-radius:99px"></div>
-      <div style="background:#152535;border:1px solid #00bcd430;border-radius:20px;padding:22px;box-shadow:0 18px 60px #00000045">
-        <div style="width:38px;height:38px;border:3px solid #00bcd4;border-top-color:transparent;border-radius:50%;margin:0 auto 14px;animation:spin .7s linear infinite"></div>
-        <div style="font-size:15px;font-weight:800;color:#ffffff;margin-bottom:6px">Abriendo app...</div>
-        <div id="jf-fast-msg" style="font-size:12px;color:#a8cdd8;line-height:1.5">Carga rápida activada</div>
+  <div id="jf-fast-shell" style="min-height:100dvh;display:flex;align-items:center;justify-content:center;background:#0d1b2a;color:#e2f7fb;font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:24px;text-align:center">
+    <div style="width:100%;max-width:360px">
+      <div style="font-size:30px;font-weight:900;letter-spacing:.14em;color:#00e5ff;text-shadow:0 0 18px #00bcd480;margin-bottom:10px">JuandaFit</div>
+      <div style="height:3px;width:120px;margin:0 auto 28px;background:linear-gradient(90deg,transparent,#00bcd4,transparent);border-radius:99px"></div>
+      <div style="font-size:18px;font-weight:900;color:#ffffff;letter-spacing:.05em;margin-bottom:18px">¿Cómo deseas ingresar?</div>
+      <button onclick="window.__JF_FAST_NAV='login';var m=document.getElementById('jf-fast-msg');if(m)m.textContent='Abriendo acceso de usuario...';this.disabled=true;" style="width:100%;padding:14px;border-radius:12px;border:none;background:linear-gradient(135deg,#00bcd4,#0097a7);color:#fff;font-weight:800;font-size:15px;box-shadow:0 4px 15px #00bcd440;margin-bottom:12px;cursor:pointer">Soy Usuario</button>
+      <button onclick="window.__JF_FAST_NAV='trainer_login';var m=document.getElementById('jf-fast-msg');if(m)m.textContent='Abriendo acceso de entrenador...';this.disabled=true;" style="width:100%;padding:14px;border-radius:12px;border:1.5px solid #00bcd460;background:transparent;color:#e2f7fb;font-weight:800;font-size:15px;cursor:pointer">Soy Entrenador</button>
+      <div style="background:#152535;border:1px solid #00bcd430;border-radius:16px;padding:14px;margin-top:22px;box-shadow:0 18px 60px #00000035">
+        <div style="display:inline-block;width:20px;height:20px;border:2px solid #00bcd4;border-top-color:transparent;border-radius:50%;margin:0 auto 8px;animation:spin .7s linear infinite"></div>
+        <div id="jf-fast-msg" style="font-size:12px;color:#a8cdd8;line-height:1.5">Interfaz inmediata activada; módulos cargando en segundo plano...</div>
       </div>
     </div>
   </div>
@@ -275,6 +283,13 @@ function jfLoadScriptOnce(src){
     document.head.appendChild(s);
     setTimeout(()=>{try{s.remove();}catch(e){}},0);
   }
+  function fetchTextFast(url, timeoutMs){
+    var controller = window.AbortController ? new AbortController() : null;
+    var timer = controller ? setTimeout(function(){ try{controller.abort();}catch(e){} }, timeoutMs||2500) : null;
+    return fetch(url,{cache:'force-cache', mode:'cors', signal: controller ? controller.signal : undefined})
+      .then(function(res){ if(!res.ok) throw new Error('HTTP '+res.status); return res.text(); })
+      .finally(function(){ if(timer) clearTimeout(timer); });
+  }
   async function fetchAndEval(){
     try{
       const cached=localStorage.getItem(key);
@@ -284,13 +299,10 @@ function jfLoadScriptOnce(src){
       }
     }catch(e){}
     try{
-      const res=await fetch(src,{cache:'force-cache', mode:'cors'});
-      if(res.ok){
-        const txt=await res.text();
-        try{localStorage.setItem(key, txt);}catch(e){}
-        evalCode(txt);
-        if(testFirebase()) return true;
-      }
+      const txt=await fetchTextFast(src, 2400);
+      try{localStorage.setItem(key, txt);}catch(e){}
+      evalCode(txt);
+      if(testFirebase()) return true;
     }catch(e){ console.warn('firebase fetch fallback:', src, e); }
 
     return new Promise(function(resolve, reject){
@@ -1438,7 +1450,7 @@ function App(){
         console.warn('Firebase se cargará al iniciar sesión:', e);
         setAuthReady(true);
       }
-    }, 4000);
+    }, 1800);
 
     return ()=>{ cancelled=true; clearTimeout(restoreTimer); if(typeof unsubAuth==='function')unsubAuth(); };
   },[]);
@@ -1449,7 +1461,10 @@ function App(){
     : user    ? 'home'
     : 'choose';
   const setScr = (s)=>{ if(s==='choose'||s==='login'||s==='trainer_login') _setNavScr(s); };
-  const [navScr, _setNavScr] = useState(null);
+  const [navScr, _setNavScr] = useState(function(){
+    var s = (typeof window !== 'undefined') ? window.__JF_FAST_NAV : null;
+    return (s==='login'||s==='trainer_login') ? s : null;
+  });
   const efectiveScr = (navScr && !trainer && !user) ? navScr : scr;
 
   // Real-time profile listener — actualiza sin cerrar sesión
@@ -1529,6 +1544,10 @@ function LoginScreen({onBack, onLogin}){
   const [err,setErr]=useState('');
   const [info,setInfo]=useState(''); // mensaje neutro de confirmación
   const [loading,setLoading]=useState(false);
+
+  useEffect(()=>{
+    ensureFirebaseReady().catch(e=>console.warn('user login firebase preload:', e));
+  },[]);
   const [toast,showToast]=useToast();
 
   async function doLogin(){
@@ -1652,6 +1671,10 @@ function TrainerLoginScreen({onBack, onLogin}){
   const [pin,setPin]=useState('');
   const [err,setErr]=useState('');
   const [loading,setLoading]=useState(false);
+
+  useEffect(()=>{
+    ensureFirebaseReady().catch(e=>console.warn('trainer login firebase preload:', e));
+  },[]);
 
   async function doLogin(){
     if(!pin||pin.length<3){setErr('Ingresa tu PIN');return;}
@@ -3560,12 +3583,17 @@ function DayEditTrainer({user:u,trainer,day,exercises,notes,onBack,onSave,onUpda
       showMissingDeps();
       return;
     }
-    // Primero pintar la app; Firebase se activa en segundo plano o cuando el usuario lo necesite.
-    setTimeout(function(){
+    // Primero pintar la app; luego precargar Firebase en segundo plano para que el login no se sienta lento.
+    var warmFirebase = function(){
       ensureFirebaseReady().catch(function(e){
         console.warn('Firebase background init deferred:', e);
       });
-    }, 6500);
+    };
+    if(window.requestIdleCallback){
+      requestIdleCallback(warmFirebase, {timeout: 1200});
+    }else{
+      setTimeout(warmFirebase, 900);
+    }
     ({useState,useEffect,useRef,useCallback} = React);
     const root=document.getElementById('root');
     if(!root){ showMissingDeps(); return; }

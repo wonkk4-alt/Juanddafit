@@ -10,8 +10,8 @@
 <link rel="dns-prefetch" href="https://cdn.jsdelivr.net">
 <link rel="dns-prefetch" href="https://unpkg.com">
 <link rel="dns-prefetch" href="https://www.gstatic.com">
-<link rel="preload" href="./assets/logo.webp" as="image">
-<link rel="preload" href="./assets/app.js" as="script">
+<link rel="preload" href="./logo.webp" as="image">
+<link rel="preload" href="./app.js" as="script">
 <link rel="preload" href="https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js" as="script" crossorigin>
 <link rel="preload" href="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js" as="script" crossorigin>
 <style>
@@ -107,17 +107,13 @@ input::placeholder{
   animation:spin .75s linear infinite;
 }
 </style>
-<style>
-.jf-shell-btn{width:100%;padding:14px;border-radius:12px;font-weight:800;font-size:15px;cursor:pointer}
-.jf-shell-primary{border:none;background:linear-gradient(135deg,#00bcd4,#0097a7);color:#fff;box-shadow:0 4px 15px #00bcd440;margin-bottom:12px}
-.jf-shell-secondary{border:1.5px solid #00bcd460;background:transparent;color:#e2f7fb}
-</style>
+<style>.jf-shell-btn{width:100%;padding:14px;border-radius:12px;font-weight:800;font-size:15px;cursor:pointer}.jf-shell-primary{border:none;background:linear-gradient(135deg,#00bcd4,#0097a7);color:#fff;box-shadow:0 4px 15px #00bcd440;margin-bottom:12px}.jf-shell-secondary{border:1.5px solid #00bcd460;background:transparent;color:#e2f7fb}</style>
 </head>
 <body>
 <div id="root">
   <div id="jf-fast-shell" style="min-height:100dvh;display:flex;align-items:center;justify-content:center;background:#0d1b2a;color:#e2f7fb;font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:24px;text-align:center">
     <div style="width:100%;max-width:360px">
-      <img src="./assets/logo.webp" alt="JuandaFit" width="128" height="128" decoding="async" fetchpriority="high" style="width:128px;height:128px;object-fit:contain;margin:0 auto 16px;display:block;filter:drop-shadow(0 0 20px #00bcd440)">
+      <img src="./logo.webp" alt="JuandaFit" width="128" height="128" decoding="async" fetchpriority="high" style="width:128px;height:128px;object-fit:contain;margin:0 auto 16px;display:block;filter:drop-shadow(0 0 20px #00bcd440)">
       <div style="font-size:30px;font-weight:900;letter-spacing:.14em;color:#00e5ff;text-shadow:0 0 18px #00bcd480;margin-bottom:10px">JuandaFit</div>
       <div style="height:3px;width:120px;margin:0 auto 28px;background:linear-gradient(90deg,transparent,#00bcd4,transparent);border-radius:99px"></div>
       <div style="font-size:18px;font-weight:900;color:#ffffff;letter-spacing:.05em;margin-bottom:18px">¿Cómo deseas ingresar?</div>
@@ -125,20 +121,20 @@ input::placeholder{
       <button class="jf-shell-btn jf-shell-secondary" onclick="window.__JF_FAST_NAV='trainer_login';var m=document.getElementById('jf-fast-msg');if(m)m.textContent='Abriendo acceso de entrenador...';this.disabled=true;">Soy Entrenador</button>
       <div style="background:#152535;border:1px solid #00bcd430;border-radius:16px;padding:14px;margin-top:22px;box-shadow:0 18px 60px #00000035">
         <div style="display:inline-block;width:20px;height:20px;border:2px solid #00bcd4;border-top-color:transparent;border-radius:50%;margin:0 auto 8px;animation:spin .7s linear infinite"></div>
-        <div id="jf-fast-msg" style="font-size:12px;color:#a8cdd8;line-height:1.5">Carga móvil extrema activada...</div>
+        <div id="jf-fast-msg" style="font-size:12px;color:#a8cdd8;line-height:1.5">Versión rápida simple activada...</div>
       </div>
     </div>
   </div>
 </div>
 <script>
-window.JF_LOGO_SRC='./assets/logo.webp';
+window.JF_LOGO_SRC='./logo.webp';
 window.__JF_EX_IMGS={};
 window.__JF_EX_IMGS_LOADED=false;
 window.__JF_EX_IMGS_LOADING=false;
 window.JF_getEX_IMGS=function(){
   if(!window.__JF_EX_IMGS_LOADED && !window.__JF_EX_IMGS_LOADING){
     window.__JF_EX_IMGS_LOADING=true;
-    fetch('./assets/ex-imgs.json',{cache:'force-cache'})
+    fetch('./ex-imgs.json',{cache:'force-cache'})
       .then(function(r){ if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); })
       .then(function(data){
         window.__JF_EX_IMGS=data||{};
@@ -146,10 +142,7 @@ window.JF_getEX_IMGS=function(){
         window.__JF_EX_IMGS_LOADING=false;
         window.dispatchEvent(new Event('jf-ex-imgs-ready'));
       })
-      .catch(function(e){
-        window.__JF_EX_IMGS_LOADING=false;
-        console.warn('No se pudieron cargar imágenes de ejercicios:', e);
-      });
+      .catch(function(e){ window.__JF_EX_IMGS_LOADING=false; console.warn('No se pudieron cargar imágenes de ejercicios:', e); });
   }
   return window.__JF_EX_IMGS||{};
 };
@@ -157,86 +150,20 @@ window.JF_EX_IMGS=new Proxy({},{
   get:function(t,p){ return window.JF_getEX_IMGS()[p]; },
   has:function(t,p){ return p in window.JF_getEX_IMGS(); },
   ownKeys:function(){ return Reflect.ownKeys(window.JF_getEX_IMGS()); },
-  getOwnPropertyDescriptor:function(t,p){
-    var v=window.JF_getEX_IMGS()[p];
-    return v===undefined ? undefined : {enumerable:true, configurable:true};
-  }
+  getOwnPropertyDescriptor:function(t,p){ var v=window.JF_getEX_IMGS()[p]; return v===undefined ? undefined : {enumerable:true, configurable:true}; }
 });
 (function(){
-  function msg(t){ var el=document.getElementById('jf-fast-msg'); if(el) el.textContent=t; }
-  function fatal(){
-    document.body.style.cssText='background:#0d1b2a;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;font-family:sans-serif;';
-    document.body.innerHTML='<div style="text-align:center;color:#e2f7fb;padding:32px;max-width:320px"><div style="font-size:48px;margin-bottom:16px">📡</div><div style="font-size:18px;font-weight:700;color:#00bcd4;margin-bottom:12px">No se pudo cargar JuandaFit</div><div style="font-size:13px;color:#a8cdd8;line-height:1.6">Verifica la conexión a internet y recarga la página.</div><button onclick="location.reload()" style="margin-top:20px;padding:12px 24px;border-radius:12px;border:none;background:#00bcd4;color:#fff;font-weight:700;font-size:14px;cursor:pointer">Reintentar</button></div>';
-  }
-  function evalCachedScript(cacheKey, testFn, label){
-    try{
-      if(testFn && testFn()) return true;
-      var cached=localStorage.getItem(cacheKey);
-      if(!cached) return false;
-      var s=document.createElement('script');
-      s.text=String(cached)+'\n//# sourceURL='+label+'-cached.js';
-      document.head.appendChild(s);
-      setTimeout(function(){ try{s.remove();}catch(e){} }, 0);
-      return !testFn || testFn();
-    }catch(e){
-      console.warn('cache '+label+':', e);
-      return false;
-    }
-  }
-  function loadScript(urls, testFn, label, timeoutMs){
-    urls = Array.isArray(urls) ? urls : [urls];
-    var i=0;
-    return new Promise(function(resolve,reject){
-      function next(){
-        if(testFn && testFn()) return resolve(true);
-        if(i>=urls.length) return reject(new Error('No se pudo cargar '+label));
-        var url=urls[i++];
-        var s=document.createElement('script');
-        var done=false;
-        var timer=setTimeout(function(){
-          if(done) return; done=true;
-          try{s.remove();}catch(e){}
-          next();
-        }, timeoutMs||2600);
-        s.src=url;
-        s.async=true;
-        s.crossOrigin='anonymous';
-        s.onload=function(){
-          if(done) return; done=true; clearTimeout(timer);
-          if(!testFn || testFn()) resolve(true); else next();
-        };
-        s.onerror=function(){
-          if(done) return; done=true; clearTimeout(timer); next();
-        };
-        document.head.appendChild(s);
-      }
-      next();
-    });
-  }
-  msg('Cargando núcleo ultraligero...');
+  function msg(t){var el=document.getElementById('jf-fast-msg');if(el)el.textContent=t;}
+  function fatal(){document.body.style.cssText='background:#0d1b2a;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;font-family:sans-serif;';document.body.innerHTML='<div style="text-align:center;color:#e2f7fb;padding:32px;max-width:320px"><div style="font-size:48px;margin-bottom:16px">📡</div><div style="font-size:18px;font-weight:700;color:#00bcd4;margin-bottom:12px">No se pudo cargar JuandaFit</div><div style="font-size:13px;color:#a8cdd8;line-height:1.6">Verifica la conexión a internet y recarga la página.</div><button onclick="location.reload()" style="margin-top:20px;padding:12px 24px;border-radius:12px;border:none;background:#00bcd4;color:#fff;font-weight:700;font-size:14px;cursor:pointer">Reintentar</button></div>';}
+  function evalCachedScript(cacheKey,testFn,label){try{if(testFn&&testFn())return true;var cached=localStorage.getItem(cacheKey);if(!cached)return false;var s=document.createElement('script');s.text=String(cached)+'\n//# sourceURL='+label+'-cached.js';document.head.appendChild(s);setTimeout(function(){try{s.remove();}catch(e){}},0);return !testFn||testFn();}catch(e){console.warn('cache '+label+':',e);return false;}}
+  function loadScript(urls,testFn,label,timeoutMs){urls=Array.isArray(urls)?urls:[urls];var i=0;return new Promise(function(resolve,reject){function next(){if(testFn&&testFn())return resolve(true);if(i>=urls.length)return reject(new Error('No se pudo cargar '+label));var url=urls[i++],s=document.createElement('script'),done=false;var timer=setTimeout(function(){if(done)return;done=true;try{s.remove();}catch(e){}next();},timeoutMs||2600);s.src=url;s.async=true;s.crossOrigin='anonymous';s.onload=function(){if(done)return;done=true;clearTimeout(timer);if(!testFn||testFn())resolve(true);else next();};s.onerror=function(){if(done)return;done=true;clearTimeout(timer);next();};document.head.appendChild(s);}next();});}
+  msg('Cargando núcleo rápido...');
   Promise.resolve()
-  .then(function(){
-    if(evalCachedScript('jf_cache_react_18_prod_v2', function(){return !!window.React;}, 'react18')) return true;
-    return loadScript([
-      'https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js',
-      'https://unpkg.com/react@18/umd/react.production.min.js'
-    ], function(){return !!window.React;}, 'React', 2400);
-  })
-  .then(function(){
-    msg('Montando interfaz...');
-    if(evalCachedScript('jf_cache_reactdom_18_prod_v2', function(){return !!window.ReactDOM;}, 'reactdom18')) return true;
-    return loadScript([
-      'https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js',
-      'https://unpkg.com/react-dom@18/umd/react-dom.production.min.js'
-    ], function(){return !!window.ReactDOM;}, 'ReactDOM', 2400);
-  })
-  .then(function(){ msg('Entrando...'); return loadScript('./assets/app.js', null, 'JuandaFit', 10000); })
-  .catch(function(e){ console.warn(e); fatal(); });
-  if('serviceWorker' in navigator && location.protocol.indexOf('http')===0){
-    window.addEventListener('load', function(){
-      navigator.serviceWorker.register('./sw.js').catch(function(e){console.warn('sw:',e);});
-    });
-  }
+    .then(function(){if(evalCachedScript('jf_cache_react_18_prod_v2',function(){return !!window.React;},'react18'))return true;return loadScript(['https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js','https://unpkg.com/react@18/umd/react.production.min.js'],function(){return !!window.React;},'React',2400);})
+    .then(function(){msg('Montando interfaz...');if(evalCachedScript('jf_cache_reactdom_18_prod_v2',function(){return !!window.ReactDOM;},'reactdom18'))return true;return loadScript(['https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js','https://unpkg.com/react-dom@18/umd/react-dom.production.min.js'],function(){return !!window.ReactDOM;},'ReactDOM',2400);})
+    .then(function(){msg('Entrando...');return loadScript('./app.js',null,'JuandaFit',10000);})
+    .catch(function(e){console.warn(e);fatal();});
+  if('serviceWorker' in navigator && location.protocol.indexOf('http')===0){window.addEventListener('load',function(){navigator.serviceWorker.register('./sw.js').catch(function(e){console.warn('sw:',e);});});}
 })();
 </script>
 </body>

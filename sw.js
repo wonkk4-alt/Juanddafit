@@ -1,36 +1,5 @@
-const CACHE='juandafit-mobile-fast-v1';
-const CORE=[
-  './assets/app.js',
-  './assets/logo.webp',
-  './assets/ex-imgs.json',
-  'https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js',
-  'https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js',
-  'https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js',
-  'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js',
-  'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js'
-];
-self.addEventListener('install',event=>{
-  self.skipWaiting();
-  event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(CORE).catch(()=>null)));
-});
-self.addEventListener('activate',event=>{
-  event.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(k=>k!==CACHE).map(k=>caches.delete(k)))));
-  self.clients.claim();
-});
-self.addEventListener('fetch',event=>{
-  const req=event.request;
-  if(req.method!=='GET') return;
-  const url=new URL(req.url);
-  if(req.mode==='navigate'){
-    event.respondWith(fetch(req).then(resp=>{
-      const clone=resp.clone(); caches.open(CACHE).then(c=>c.put(req,clone)); return resp;
-    }).catch(()=>caches.match(req)));
-    return;
-  }
-  const cacheable=url.origin===location.origin || /cdn\.jsdelivr\.net|unpkg\.com|www\.gstatic\.com/.test(url.hostname);
-  if(!cacheable) return;
-  event.respondWith(caches.match(req).then(cached=>cached || fetch(req).then(resp=>{
-    if(resp && (resp.ok || resp.type==='opaque')){ const clone=resp.clone(); caches.open(CACHE).then(c=>c.put(req,clone)); }
-    return resp;
-  })));
-});
+const CACHE='juandafit-fast-simple-v3-no-bulk';
+const CORE=['./index.html','./app.js','./ex-imgs.json','./logo.webp','https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js','https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js','https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js','https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js','https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js'];
+self.addEventListener('install',e=>{self.skipWaiting();e.waitUntil(caches.open(CACHE).then(c=>c.addAll(CORE).catch(()=>null)));});
+self.addEventListener('activate',e=>{e.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(k=>k!==CACHE).map(k=>caches.delete(k)))));self.clients.claim();});
+self.addEventListener('fetch',e=>{const r=e.request;if(r.method!=='GET')return;const u=new URL(r.url);if(r.mode==='navigate'){e.respondWith(fetch(r).then(resp=>{const clone=resp.clone();caches.open(CACHE).then(c=>c.put(r,clone));return resp;}).catch(()=>caches.match(r)));return;}const ok=u.origin===location.origin||/cdn\.jsdelivr\.net|unpkg\.com|www\.gstatic\.com/.test(u.hostname);if(!ok)return;e.respondWith(caches.match(r).then(cached=>cached||fetch(r).then(resp=>{if(resp&&(resp.ok||resp.type==='opaque')){const clone=resp.clone();caches.open(CACHE).then(c=>c.put(r,clone));}return resp;})));});

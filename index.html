@@ -390,7 +390,9 @@ const DB = {
       uid, email: email.trim().toLowerCase(), name, tel: tel||'', role:'user',
       accessStatus:'active', accessReason:'',
       profileStatus:'pending', objetivo:'', frecuencia:'', peso:'',
-      estatura:'', imc:'', grasaVisceral:'', grasaCorporal:'', masaMuscular:'', edad:'', condicion:'', createdAt: Date.now()
+      estatura:'', imc:'', grasaVisceral:'', grasaCorporal:'', masaMuscular:'', edad:'', condicion:'',
+      unlockedVideos: [],
+      createdAt: Date.now()
     };
     await db_fs.collection('users').doc(uid).set(doc);
     return doc;
@@ -542,6 +544,21 @@ const DB = {
 
   async getExerciseInfo(exId){
     await ensureFirebaseReady(); return this.getExInfo(exId); },
+
+  // ── Videos desbloqueados por usuario ─────────────────────────────────────────
+  async getUnlockedVideos(uid){
+    await ensureFirebaseReady();
+    const snap = await db_fs.collection('users').doc(uid).get();
+    if(!snap.exists) return [];
+    const data = snap.data();
+    return Array.isArray(data.unlockedVideos) ? data.unlockedVideos : [];
+  },
+
+  async setUnlockedVideos(uid, videoKeys){
+    await ensureFirebaseReady();
+    await db_fs.collection('users').doc(uid).update({ unlockedVideos: videoKeys });
+    return true;
+  },
 
   async saveExInfo(exId, data){
     await ensureFirebaseReady();
@@ -1965,10 +1982,12 @@ function ExerciseScreen({user,day,exercise:ex,routine,onBack}){
   const [localSets,setLocalSets]=useState(parseInt(ex.sets)||3);
   const [localReps,setLocalReps]=useState(parseInt(ex.reps)||10);
   const [localRest,setLocalRest]=useState(parseInt(ex.rest)||60);
+  const [unlockedVideos,setUnlockedVideos]=useState(null); // null = loading
+  const [showVideoLocked,setShowVideoLocked]=useState(false);
 
   const restRef=React.useRef(null);
 
-  // Cargar log + nota + info del ejercicio
+  // Cargar log + nota + info del ejercicio + videos desbloqueados
   useEffect(()=>{
     async function load(){
       const l=await DB.getExerciseLog(user.uid,ex.id,today);
@@ -1978,6 +1997,12 @@ function ExerciseScreen({user,day,exercise:ex,routine,onBack}){
       setNote(n||'');
       const info=await DB.getExInfo(ex.id);
       setExInfo(info||null);
+      try{
+        const uv=await DB.getUnlockedVideos(user.uid);
+        setUnlockedVideos(uv||[]);
+      }catch(e){
+        setUnlockedVideos([]);
+      }
     }
     load();
     return()=>{if(restRef.current)clearInterval(restRef.current);};
@@ -2106,7 +2131,23 @@ function ExerciseScreen({user,day,exercise:ex,routine,onBack}){
         )
       ),
 
-      // Videos/tutoriales
+      // Modal video bloqueado
+      showVideoLocked&&React.createElement('div',{style:{position:'fixed',inset:0,background:'rgba(0,0,0,0.82)',zIndex:9999,display:'flex',alignItems:'center',justifyContent:'center',padding:20},onClick:()=>setShowVideoLocked(false)},
+        React.createElement('div',{style:{background:'#0d1b2a',border:'2px solid #ef444460',borderRadius:20,padding:28,maxWidth:340,width:'100%',textAlign:'center'},onClick:e=>e.stopPropagation()},
+          React.createElement('div',{style:{fontSize:44,marginBottom:12}},'🔒'),
+          React.createElement('div',{style:{fontWeight:900,fontSize:17,color:'#ef4444',marginBottom:10,fontFamily:"'Rajdhani',sans-serif",letterSpacing:'.05em'}},'VIDEO BLOQUEADO'),
+          React.createElement('div',{style:{fontSize:13,color:'#e2f7fb',lineHeight:1.6,marginBottom:16}},
+            'Este contenido aún no está habilitado en tu plan. Para desbloquearlo, comunícate con tu entrenador y realiza el pago correspondiente por fuera de la app (transferencia, Nequi, Daviplata, efectivo u otro medio).'
+          ),
+          React.createElement('div',{style:{background:'#152535',borderRadius:12,padding:'10px 14px',marginBottom:16,fontSize:12,color:'#7aadbe',display:'flex',gap:8,alignItems:'center',textAlign:'left'}},
+            React.createElement('span',{style:{fontSize:18}},'💬'),
+            'Una vez confirmes el pago, tu entrenador activará el acceso desde tu ficha.'
+          ),
+          React.createElement('button',{onClick:()=>setShowVideoLocked(false),style:{background:'#00bcd4',border:'none',borderRadius:12,padding:'12px 28px',color:'#0d1b2a',fontWeight:900,fontSize:14,cursor:'pointer',width:'100%'}},'Entendido')
+        )
+      ),
+
+      // Videos/tutoriales (con control de acceso)
       (()=>{
         let urls=[];
         if(exInfo!==null){
@@ -2115,32 +2156,51 @@ function ExerciseScreen({user,day,exercise:ex,routine,onBack}){
           } else {
             const defaultLabels=['Ver tutorial','Tutorial alternativo','Tutorial extra'];
             ['video','video2','video3'].forEach((k,i)=>{
-              if(exInfo[k])urls.push({url:exInfo[k],label:defaultLabels[i]});
+              if(exInfo[k])urls.push({url:exInfo[k],label:defaultLabels[i],key:ex.id+'_'+k});
             });
-            if(exInfo.link)urls.push({url:exInfo.link,label:exInfo.linkLabel||'Enlace del entrenador'});
+            if(exInfo.link)urls.push({url:exInfo.link,label:exInfo.linkLabel||'Enlace del entrenador',key:ex.id+'_link'});
           }
         } else {
           const defaultLabels=['Ver tutorial','Tutorial alternativo','Tutorial extra'];
-          [ex.video,ex.video2,ex.video3].forEach((u,i)=>{if(u)urls.push({url:u,label:defaultLabels[i]});});
+          [ex.video,ex.video2,ex.video3].forEach((u,i)=>{if(u)urls.push({url:u,label:defaultLabels[i],key:ex.id+'_video'+(i===0?'':i+1)});});
         }
         if(urls.length===0)return null;
+        // Asignar key a cada url si no tiene
+        urls=urls.map((lk,i)=>({...lk,key:lk.key||(ex.id+'_v'+i)}));
+        const uvLoading=unlockedVideos===null;
         return React.createElement('div',{style:{marginBottom:12}},
           urls.map((lk,i)=>{
             const href=lk.url.includes('/embed/')?lk.url.replace('/embed/','/watch?v='):lk.url;
             const isYT=href.includes('youtube')||href.includes('youtu.be');
             const isDrive=href.includes('drive.google');
-            const color=isDrive?'#fbbf24':isYT?'#f87171':'#00bcd4';
-            const bg=isDrive?'#2d200a':isYT?'#2d0d0d':'#0d2030';
-            const border=isDrive?'#fbbf2440':isYT?'#f8717140':'#00bcd430';
-            return React.createElement('a',{key:i,
-              href,target:'_blank',rel:'noopener noreferrer',
+            const isUnlocked=!uvLoading&&Array.isArray(unlockedVideos)&&unlockedVideos.includes(lk.key);
+            const color=isUnlocked?(isDrive?'#fbbf24':isYT?'#f87171':'#00bcd4'):'#64748b';
+            const bg=isUnlocked?(isDrive?'#2d200a':isYT?'#2d0d0d':'#0d2030'):'#121d28';
+            const border=isUnlocked?(isDrive?'#fbbf2440':isYT?'#f8717140':'#00bcd430'):'#64748b30';
+            if(isUnlocked){
+              return React.createElement('a',{key:i,
+                href,target:'_blank',rel:'noopener noreferrer',
+                style:{display:'flex',alignItems:'center',gap:10,padding:'12px 14px',
+                  background:bg,borderRadius:12,color,fontWeight:700,fontSize:13,
+                  textDecoration:'none',marginBottom:i<urls.length-1?6:0,
+                  border:'1.5px solid '+border}
+              },
+                React.createElement('span',{style:{fontSize:18}},isYT?'▶':isDrive?'📁':'🔗'),
+                lk.label||(isYT?'Ver tutorial':'Ver enlace')
+              );
+            }
+            return React.createElement('button',{key:i,
+              onClick:()=>setShowVideoLocked(true),
               style:{display:'flex',alignItems:'center',gap:10,padding:'12px 14px',
                 background:bg,borderRadius:12,color,fontWeight:700,fontSize:13,
-                textDecoration:'none',marginBottom:i<urls.length-1?6:0,
-                border:'1.5px solid '+border}
+                width:'100%',textAlign:'left',cursor:'pointer',
+                marginBottom:i<urls.length-1?6:0,
+                border:'1.5px solid '+border,
+                opacity:uvLoading?0.5:1}
             },
-              React.createElement('span',{style:{fontSize:18}},isYT?'▶':isDrive?'':'🔗'),
-              lk.label||(isYT?'Ver tutorial':'Ver enlace')
+              React.createElement('span',{style:{fontSize:18}},uvLoading?'⏳':'🔒'),
+              React.createElement('span',{style:{flex:1}},lk.label||(isYT?'Ver tutorial':'Ver enlace')),
+              !uvLoading&&React.createElement('span',{style:{fontSize:10,background:'#ef444420',color:'#ef4444',borderRadius:6,padding:'2px 7px',fontWeight:700,letterSpacing:'.05em'}},'BLOQUEADO')
             );
           })
         );
@@ -2628,10 +2688,13 @@ function UserFicha({user:u,trainer,onBack}){
   const [loading,setLoading]=useState(false);
   const [ver,setVer]=useState(0);
   // Profile editing (trainer only)
-  const [profileTab,setProfileTab]=useState('routine'); // routine | profile
+  const [profileTab,setProfileTab]=useState('routine'); // routine | profile | videos
   const [pDraft,setPDraft]=useState({...u});
   const [savingProfile,setSavingProfile]=useState(false);
   const [profileSaved,setProfileSaved]=useState(false);
+  const [unlockedVideos,setUnlockedVideos]=useState(null); // null = not loaded
+  const [savingVideos,setSavingVideos]=useState(false);
+  const [videosSaved,setVideosSaved]=useState(false);
 
   const ALL_OBJECTIVES=['Acondicionamiento','Hipertrofia','Fuerza general','Resistencia','Tonificación','Movilidad','Rehabilitación','Pérdida de grasa','Desafío de fuerza'];
 
@@ -2744,10 +2807,10 @@ function UserFicha({user:u,trainer,onBack}){
       React.createElement('button',{className:'hdr-back',onClick:onBack},'Volver'),
       React.createElement('div',{className:'hdr-title'},'FICHA: '+(u.name||u.email||'Usuario').toUpperCase())
     ),
-    // Tabs: Rutina | Perfil
+    // Tabs: Rutina | Perfil | Videos
     React.createElement('div',{style:{display:'flex',background:'#152535',borderBottom:'1px solid #00bcd420',flexShrink:0}},
-      [{id:'routine',label:'Rutina'},{id:'profile',label:'Perfil'}].map(t=>
-        React.createElement('button',{key:t.id,onClick:()=>setProfileTab(t.id),style:{flex:1,padding:'10px',border:'none',background:'transparent',fontWeight:700,fontSize:12,color:profileTab===t.id?trainerColor:'#7aadbe',borderBottom:'2px solid '+(profileTab===t.id?trainerColor:'transparent'),cursor:'pointer'}},t.label)
+      [{id:'routine',label:'Rutina'},{id:'profile',label:'Perfil'},{id:'videos',label:'🔒 Videos'}].map(t=>
+        React.createElement('button',{key:t.id,onClick:()=>{setProfileTab(t.id);if(t.id==='videos'&&unlockedVideos===null){DB.getUnlockedVideos(u.uid||u.email).then(v=>setUnlockedVideos(v||[])).catch(()=>setUnlockedVideos([]));}},style:{flex:1,padding:'10px',border:'none',background:'transparent',fontWeight:700,fontSize:11,color:profileTab===t.id?trainerColor:'#7aadbe',borderBottom:'2px solid '+(profileTab===t.id?trainerColor:'transparent'),cursor:'pointer'}},t.label)
       )
     ),
     loading?React.createElement('div',{style:{flex:1,display:'flex',alignItems:'center',justifyContent:'center'}},React.createElement('div',{className:'spin'})):
@@ -2856,6 +2919,117 @@ function UserFicha({user:u,trainer,onBack}){
         React.createElement('button',{className:'btn btn-primary',onClick:saveProfile,style:{background:trainerColor}},
           profileSaved?'Guardado':'💾 Guardar perfil'
         )
+    ):
+    profileTab==='videos'?
+    // ── VIDEOS TAB ───────────────────────────────────────────────────────────
+    React.createElement('div',{className:'scrollable',style:{padding:14,background:'#0d1b2a'}},
+      React.createElement('div',{style:{background:'#152535',border:'1px solid '+trainerColor+'33',borderRadius:10,padding:'10px 12px',marginBottom:14,fontSize:11,color:trainerColor,fontWeight:700}},
+        '🔒 Control de videos de: '+(u.name||u.email||'Usuario')+' — Activa o desactiva cada video individualmente.'
+      ),
+      React.createElement('div',{style:{background:'#0d2030',border:'1px solid #00bcd430',borderRadius:10,padding:'10px 14px',marginBottom:14,fontSize:12,color:'#7aadbe',lineHeight:1.6}},
+        '💡 Los videos bloqueados muestran al usuario un mensaje indicando que debe pagar con su entrenador. El pago se realiza fuera de la app. Una vez confirmado, activa el acceso aquí.'
+      ),
+      unlockedVideos===null
+        ? React.createElement('div',{style:{textAlign:'center',padding:40}},React.createElement('div',{className:'spin'}))
+        : React.createElement('div',null,
+            // Mostrar todos los ejercicios que tienen video
+            (()=>{
+              // Recolectar todos los ejercicios del catálogo con al menos un video
+              const allExWithVideo = ALL_EXERCISES.filter(ex=>ex.video||ex.video2||ex.video3);
+              const totalUnlocked = (unlockedVideos||[]).length;
+              const totalVideos = allExWithVideo.reduce((acc,ex)=>acc+(ex.video?1:0)+(ex.video2?1:0)+(ex.video3?1:0),0);
+              return React.createElement('div',null,
+                // Stats bar
+                React.createElement('div',{style:{display:'flex',gap:8,marginBottom:14}},
+                  React.createElement('div',{style:{flex:1,background:'#16a34a15',border:'1px solid #16a34a30',borderRadius:10,padding:'10px',textAlign:'center'}},
+                    React.createElement('div',{style:{fontWeight:900,fontSize:22,color:'#16a34a'}},totalUnlocked),
+                    React.createElement('div',{style:{fontSize:10,color:'#a8cdd8',marginTop:2}},'Desbloqueados')
+                  ),
+                  React.createElement('div',{style:{flex:1,background:'#ef444415',border:'1px solid #ef444430',borderRadius:10,padding:'10px',textAlign:'center'}},
+                    React.createElement('div',{style:{fontWeight:900,fontSize:22,color:'#ef4444'}},totalVideos-totalUnlocked),
+                    React.createElement('div',{style:{fontSize:10,color:'#a8cdd8',marginTop:2}},'Bloqueados')
+                  ),
+                  React.createElement('div',{style:{flex:1,background:'#00bcd415',border:'1px solid #00bcd430',borderRadius:10,padding:'10px',textAlign:'center'}},
+                    React.createElement('div',{style:{fontWeight:900,fontSize:22,color:'#00bcd4'}},totalVideos),
+                    React.createElement('div',{style:{fontSize:10,color:'#a8cdd8',marginTop:2}},'Total')
+                  )
+                ),
+                // Botones rápidos
+                React.createElement('div',{style:{display:'flex',gap:8,marginBottom:14}},
+                  React.createElement('button',{onClick:()=>{
+                    const allKeys=ALL_EXERCISES.filter(ex=>ex.video||ex.video2||ex.video3).flatMap(ex=>{
+                      const ks=[];
+                      if(ex.video)ks.push(ex.id+'_video');
+                      if(ex.video2)ks.push(ex.id+'_video2');
+                      if(ex.video3)ks.push(ex.id+'_video3');
+                      return ks;
+                    });
+                    setUnlockedVideos(allKeys);
+                  },style:{flex:1,padding:'8px',borderRadius:8,border:'1px solid #16a34a40',background:'#16a34a15',color:'#16a34a',fontWeight:700,fontSize:11,cursor:'pointer'}},'✅ Desbloquear todo'),
+                  React.createElement('button',{onClick:()=>setUnlockedVideos([]),style:{flex:1,padding:'8px',borderRadius:8,border:'1px solid #ef444440',background:'#ef444415',color:'#ef4444',fontWeight:700,fontSize:11,cursor:'pointer'}},'🔒 Bloquear todo')
+                ),
+                // Lista por ejercicio
+                allExWithVideo.map(ex=>{
+                  const videoKeys=[
+                    ...(ex.video?[{key:ex.id+'_video',label:'Tutorial principal'}]:[]),
+                    ...(ex.video2?[{key:ex.id+'_video2',label:'Tutorial alternativo'}]:[]),
+                    ...(ex.video3?[{key:ex.id+'_video3',label:'Tutorial extra'}]:[])
+                  ];
+                  const allUnlocked=videoKeys.every(vk=>(unlockedVideos||[]).includes(vk.key));
+                  const someUnlocked=videoKeys.some(vk=>(unlockedVideos||[]).includes(vk.key));
+                  return React.createElement('div',{key:ex.id,style:{background:'#152535',borderRadius:12,marginBottom:8,overflow:'hidden',border:'1px solid '+(allUnlocked?'#16a34a30':someUnlocked?'#fbbf2430':'#1e3347')}},
+                    // Header del ejercicio
+                    React.createElement('div',{style:{display:'flex',alignItems:'center',gap:10,padding:'10px 12px',background:'#0d1b2a20'}},
+                      React.createElement('div',{style:{flex:1}},
+                        React.createElement('div',{style:{fontWeight:700,fontSize:13,color:'#e2f7fb'}},ex.name),
+                        React.createElement('div',{style:{fontSize:10,color:'#7aadbe',marginTop:2}},ex.zone)
+                      ),
+                      React.createElement('div',{style:{fontSize:10,color:allUnlocked?'#16a34a':someUnlocked?'#fbbf24':'#64748b',fontWeight:700,background:allUnlocked?'#16a34a20':someUnlocked?'#fbbf2420':'#64748b20',borderRadius:6,padding:'3px 8px'}},
+                        allUnlocked?'✅ Activo':someUnlocked?'⚡ Parcial':'🔒 Bloq.'
+                      )
+                    ),
+                    // Videos individuales
+                    videoKeys.map(vk=>{
+                      const isOn=(unlockedVideos||[]).includes(vk.key);
+                      return React.createElement('div',{key:vk.key,style:{display:'flex',alignItems:'center',gap:10,padding:'8px 12px',borderTop:'1px solid #1e3347'}},
+                        React.createElement('div',{style:{flex:1,fontSize:12,color:isOn?'#e2f7fb':'#64748b'}},
+                          React.createElement('span',{style:{marginRight:6}},isOn?'▶':'🔒'),
+                          vk.label
+                        ),
+                        React.createElement('button',{
+                          onClick:()=>{
+                            setUnlockedVideos(prev=>{
+                              const current=Array.isArray(prev)?prev:[];
+                              return isOn?current.filter(k=>k!==vk.key):[...current,vk.key];
+                            });
+                          },
+                          style:{padding:'5px 14px',borderRadius:8,border:'none',fontWeight:700,fontSize:11,cursor:'pointer',
+                            background:isOn?'#16a34a':'#ef444420',color:isOn?'#fff':'#ef4444'}
+                        },isOn?'Activo':'Bloqueado')
+                      );
+                    })
+                  );
+                })
+              );
+            })(),
+            // Save button
+            React.createElement('div',{style:{marginTop:16}},
+              savingVideos?React.createElement('div',{style:{textAlign:'center'}},React.createElement('div',{className:'spin'})):
+              React.createElement('button',{className:'btn btn-primary',onClick:async()=>{
+                setSavingVideos(true);
+                try{
+                  await DB.setUnlockedVideos(u.uid||u.email, unlockedVideos||[]);
+                  setVideosSaved(true);
+                  setTimeout(()=>setVideosSaved(false),2500);
+                }catch(e){
+                  alert('Error al guardar videos: '+(e.message||'intenta de nuevo'));
+                }
+                setSavingVideos(false);
+              },style:{background:trainerColor}},
+                videosSaved?'✅ Guardado':'💾 Guardar cambios de videos'
+              )
+            )
+          )
     ):
     // ── ROUTINE TAB (existing content) ──────────────────────────────────────
     React.createElement('div',{className:'scrollable',style:{padding:14,background:'#0d1b2a'}},

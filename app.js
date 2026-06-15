@@ -1956,15 +1956,19 @@ function ExerciseScreen({user,day,exercise:ex,routine,onBack}){
           [ex.video,ex.video2,ex.video3].forEach((u,i)=>{if(u)urls.push({url:u,label:defaultLabels[i],key:ex.id+'_video'+(i===0?'':i+1)});});
         }
         if(urls.length===0)return null;
-        // Asignar key a cada url si no tiene
-        urls=urls.map((lk,i)=>({...lk,key:lk.key||(ex.id+'_v'+i)}));
+        // Asignar key estándar a cada URL. Debe coincidir con lo que desbloquea el entrenador.
+        urls=urls.map((lk,i)=>({
+          ...lk,
+          key:lk.key||(ex.id+'_video'+(i===0?'':i+1)),
+          legacyKey:ex.id+'_v'+i
+        }));
         const uvLoading=unlockedVideos===null;
         return React.createElement('div',{style:{marginBottom:12}},
           urls.map((lk,i)=>{
             const href=lk.url.includes('/embed/')?lk.url.replace('/embed/','/watch?v='):lk.url;
             const isYT=href.includes('youtube')||href.includes('youtu.be');
             const isDrive=href.includes('drive.google');
-            const isUnlocked=!uvLoading&&Array.isArray(unlockedVideos)&&unlockedVideos.includes(lk.key);
+            const isUnlocked=!uvLoading&&Array.isArray(unlockedVideos)&&(unlockedVideos.includes(lk.key)||unlockedVideos.includes(lk.legacyKey));
             const color=isUnlocked?(isDrive?'#fbbf24':isYT?'#f87171':'#00bcd4'):'#64748b';
             const bg=isUnlocked?(isDrive?'#2d200a':isYT?'#2d0d0d':'#0d2030'):'#121d28';
             const border=isUnlocked?(isDrive?'#fbbf2440':isYT?'#f8717140':'#00bcd430'):'#64748b30';

@@ -1,0 +1,3366 @@
+window.__JF_APP_READY=true;
+
+
+
+
+// localStorage usado como backend local
+
+
+
+// ─── TRAINER CONFIG (color/display, separate from Auth) ────────────────────────
+// El entrenador se autentica con su PIN (guardado en localStorage).
+// Su rol está en users[email].role = "trainer".
+// Color themes are stored in users/{uid} as well.
+// For MVP, fallback color map by trainer email or name:
+// ─── DB HELPERS ────────────────────────────────────────────────────────────────
+// ─── FIREBASE CONFIG ─────────────────────────────────────────────────────────
+
+var auth, db_fs;
+var __jfFirebasePromise = null;
+
+function jfLoadScriptOnce(src){
+  const key = 'jf_cache_' + src.replace(/[^a-z0-9]+/gi,'_').slice(0,80);
+  const testFirebase = function(){
+    if(src.indexOf('firebase-app-compat')>-1) return typeof firebase !== 'undefined';
+    if(src.indexOf('firebase-auth-compat')>-1) return typeof firebase !== 'undefined' && !!firebase.auth;
+    if(src.indexOf('firebase-firestore-compat')>-1) return typeof firebase !== 'undefined' && !!firebase.firestore;
+    return false;
+  };
+  function evalCode(code){
+    const s=document.createElement('script');
+    s.text=String(code||'')+'\\n//# sourceURL='+key+'.js';
+    document.head.appendChild(s);
+    setTimeout(()=>{try{s.remove();}catch(e){}},0);
+  }
+  function fetchTextFast(url, timeoutMs){
+    var controller = window.AbortController ? new AbortController() : null;
+    var timer = controller ? setTimeout(function(){ try{controller.abort();}catch(e){} }, timeoutMs||2500) : null;
+    return fetch(url,{cache:'force-cache', mode:'cors', signal: controller ? controller.signal : undefined})
+      .then(function(res){ if(!res.ok) throw new Error('HTTP '+res.status); return res.text(); })
+      .finally(function(){ if(timer) clearTimeout(timer); });
+  }
+  async function fetchAndEval(){
+    try{
+      const cached=localStorage.getItem(key);
+      if(cached){
+        evalCode(cached);
+        if(testFirebase()) return true;
+      }
+    }catch(e){}
+    try{
+      const txt=await fetchTextFast(src, 2400);
+      try{localStorage.setItem(key, txt);}catch(e){}
+      evalCode(txt);
+      if(testFirebase()) return true;
+    }catch(e){ console.warn('firebase fetch fallback:', src, e); }
+
+    return new Promise(function(resolve, reject){
+      if(document.querySelector('script[data-jf-dynamic="'+src+'"]')){
+        var existing = document.querySelector('script[data-jf-dynamic="'+src+'"]');
+        if(existing.getAttribute('data-loaded') === '1' && testFirebase()) return resolve(true);
+        existing.addEventListener('load', function(){
+          setTimeout(function(){
+            if(testFirebase()) resolve(true);
+            else reject(new Error('Firebase no expuso el módulo esperado: '+src));
+          }, 0);
+        }, {once:true});
+        existing.addEventListener('error', reject, {once:true});
+        return;
+      }
+      var s = document.createElement('script');
+      s.src = src;
+      s.async = true;
+      s.setAttribute('data-jf-dynamic', src);
+      s.onload = function(){
+        s.setAttribute('data-loaded','1');
+        setTimeout(function(){
+          if(testFirebase()) resolve(true);
+          else reject(new Error('Firebase no expuso el módulo esperado: '+src));
+        }, 0);
+      };
+      s.onerror = function(){ reject(new Error('No se pudo cargar Firebase: '+src)); };
+      document.head.appendChild(s);
+    });
+  }
+  return fetchAndEval();
+}
+
+function jfLoadFirebaseLibs(){
+  if(typeof firebase !== 'undefined' && firebase.auth && firebase.firestore) return Promise.resolve(true);
+  if(__jfFirebasePromise) return __jfFirebasePromise;
+  __jfFirebasePromise = jfLoadScriptOnce('https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js')
+    .then(function(){ return jfLoadScriptOnce('https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js'); })
+    .then(function(){ return jfLoadScriptOnce('https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js'); })
+    .then(function(){ return true; });
+  return __jfFirebasePromise;
+}
+
+async function ensureFirebaseReady(){
+  if(auth && db_fs) return true;
+  try{
+    await jfLoadFirebaseLibs();
+    var ok = initFirebaseOnce();
+    if(!ok || !auth || !db_fs){
+      __jfFirebasePromise = null;
+      throw new Error('Firebase no quedó inicializado.');
+    }
+    return true;
+  }catch(e){
+    __jfFirebasePromise = null;
+    console.error('Firebase ready error:', e);
+    throw new Error('No se pudo conectar con Firebase. Verifica conexión a internet, que Firebase esté habilitado y recarga la página.');
+  }
+}
+
+function jfStartFirebaseWatch(factory, label){
+  var stopped = false;
+  var unsub = null;
+  ensureFirebaseReady().then(function(){
+    if(stopped) return;
+    try{ unsub = factory(); }
+    catch(e){ console.warn((label||'watch')+' setup error:', e); }
+  }).catch(function(e){
+    console.warn((label||'watch')+' firebase load error:', e);
+  });
+  return function(){
+    stopped = true;
+    if(typeof unsub === 'function'){
+      try{ unsub(); }catch(e){}
+    }
+  };
+}
+
+const firebaseConfig = {
+  apiKey: "AIzaSyBWWV64ZZb0T3a2tDYjbLfBt41Btt5_x3c",
+  authDomain: "juandafit.firebaseapp.com",
+  projectId: "juandafit",
+  storageBucket: "juandafit.firebasestorage.app",
+  messagingSenderId: "196490142129",
+  appId: "1:196490142129:web:48bcdc176d05e553cddd90"
+};
+
+function initFirebaseOnce(){
+  if(auth && db_fs) return true;
+  if(typeof firebase === 'undefined'){
+    console.error('Firebase no disponible — verifica conexión a internet');
+    return false;
+  }
+  try{
+    if(!firebase.apps || !firebase.apps.length){
+      firebase.initializeApp(firebaseConfig);
+    }
+    auth = firebase.auth();
+    db_fs = firebase.firestore();
+    try{ db_fs.settings({ cacheSizeBytes: firebase.firestore.CACHE_SIZE_UNLIMITED }); }catch(e){}
+    // Persistencia offline omitida en arranque para priorizar carga ultrarrápida en móvil.
+    console.log('Firebase iniciado correctamente');
+    return true;
+  }catch(e){
+    console.error('Firebase init error:', e);
+    return false;
+  }
+}
+
+// ─── DB (Firebase) ────────────────────────────────────────────────────────────
+const DB = {
+
+  // ── Auth ────────────────────────────────────────────────────────────────────
+  async registerUser(email, password, name, tel){
+    await ensureFirebaseReady();
+    const cred = await auth.createUserWithEmailAndPassword(email.trim().toLowerCase(), password);
+    const uid = cred.user.uid;
+    const doc = {
+      uid, email: email.trim().toLowerCase(), name, tel: tel||'', role:'user',
+      accessStatus:'active', accessReason:'',
+      profileStatus:'pending', objetivo:'', frecuencia:'', peso:'',
+      estatura:'', imc:'', grasaVisceral:'', grasaCorporal:'', masaMuscular:'', edad:'', condicion:'',
+      unlockedVideos: [],
+      createdAt: Date.now()
+    };
+    await db_fs.collection('users').doc(uid).set(doc);
+    return doc;
+  },
+
+  async loginUser(email, password){
+    await ensureFirebaseReady();
+    const cred = await auth.signInWithEmailAndPassword(email.trim().toLowerCase(), password);
+    const snap = await db_fs.collection('users').doc(cred.user.uid).get();
+    if(!snap.exists) throw new Error('Usuario no encontrado.');
+    return snap.data();
+  },
+
+  async logoutUser(){
+    await ensureFirebaseReady();
+    localStorage.removeItem('jf_current_session');
+    await auth.signOut();
+  },
+
+  async resetPassword(email){
+    await ensureFirebaseReady();
+    try{
+      await auth.sendPasswordResetEmail(email.trim().toLowerCase());
+    }catch(e){}
+    return true;
+  },
+
+  getSession(email){
+    return localStorage.getItem('jf_current_session') === email ? {email} : null;
+  },
+
+  async getUserByUid(uid){
+    await ensureFirebaseReady();
+    const snap = await db_fs.collection('users').doc(uid).get();
+    return snap.exists ? snap.data() : null;
+  },
+
+  async getUserByEmail(email){
+    await ensureFirebaseReady();
+    const q = await db_fs.collection('users').where('email','==',email.trim().toLowerCase()).limit(1).get();
+    if(q.empty) return null;
+    return q.docs[0].data();
+  },
+
+  async saveUserProfile(uid, data){
+    await ensureFirebaseReady();
+    await db_fs.collection('users').doc(uid).update(data);
+    return true;
+  },
+
+  async getAllUsers(){
+    await ensureFirebaseReady();
+    const q = await db_fs.collection('users').where('role','==','user').get();
+    return q.docs.map(d => d.data());
+  },
+
+  async deleteUserData(uid, email){
+    await ensureFirebaseReady();
+    await db_fs.collection('users').doc(uid).delete();
+    await db_fs.collection('routines').doc(uid).delete();
+    return true;
+  },
+
+  async uploadAvatar(uid, base64){
+    await ensureFirebaseReady();
+    await db_fs.collection('users').doc(uid).update({avatar: base64});
+    return base64;
+  },
+
+  async getAvatarUrl(uid){
+    await ensureFirebaseReady(); return null; },
+
+  // ── Trainer auth con PIN ─────────────────────────────────────────────────────
+  async loginTrainer(email, pin){
+    await ensureFirebaseReady();
+    // El trainer se autentica por email+PIN guardado en Firestore
+    const q = await db_fs.collection('users').where('email','==',email.trim().toLowerCase()).where('role','==','trainer').limit(1).get();
+    if(q.empty) throw new Error('No se encontró el entrenador.');
+    const doc = q.docs[0].data();
+    if(doc.pin !== pin) throw new Error('PIN incorrecto.');
+    return doc;
+  },
+
+  // ── Rutinas ──────────────────────────────────────────────────────────────────
+  async getRoutine(uid){
+    await ensureFirebaseReady();
+    const snap = await db_fs.collection('routines').doc(uid).get();
+    const days = snap.exists ? (snap.data().days || {}) : {};
+    // Filtro rápido solo con caché local. No bloquea la carga consultando Firestore.
+    try{
+      const localDeleted = (this.getDeletedExerciseIdsLocal ? this.getDeletedExerciseIdsLocal() : []);
+      if(localDeleted && localDeleted.length){
+        const deletedSet = new Set(localDeleted);
+        Object.keys(days).forEach(day=>{
+          if(Array.isArray(days[day])) days[day] = days[day].filter(ex=>ex && !deletedSet.has(ex.id));
+        });
+      }
+      if(this.refreshDeletedExerciseIds) this.refreshDeletedExerciseIds();
+    }catch(e){}
+    return days;
+  },
+
+  async getAllRoutines(uid){
+    await ensureFirebaseReady();
+    return this.getRoutine(uid);
+  },
+
+  async saveRoutine(uid, day, exercises){
+    await ensureFirebaseReady();
+    // Guardar como objeto anidado real que Firestore entiende
+    var update = {};
+    update['days'] = {};
+    // Primero leer la rutina actual y mergear
+    try{
+      var existing = await this.getRoutine(uid);
+      update['days'] = Object.assign({}, existing);
+    }catch(e){}
+    update['days'][day] = exercises;
+    await db_fs.collection('routines').doc(uid).set(update, {merge: true});
+    return true;
+  },
+
+  // ── Notas de ejercicio (por usuario) ─────────────────────────────────────────
+  async getNote(uid, exId){
+    await ensureFirebaseReady();
+    const snap = await db_fs.collection('notes').doc(uid).get();
+    if(!snap.exists) return '';
+    return (snap.data()[exId] || '');
+  },
+
+  async getNotes(uid){
+    await ensureFirebaseReady();
+    const snap = await db_fs.collection('notes').doc(uid).get();
+    return snap.exists ? snap.data() : {};
+  },
+
+  async saveNote(uid, exId, note){
+    await ensureFirebaseReady();
+    await db_fs.collection('notes').doc(uid).set({[exId]: note}, {merge: true});
+    return true;
+  },
+
+  // ── Info global de ejercicios ─────────────────────────────────────────────────
+  async getExInfo(exId){
+    await ensureFirebaseReady();
+    const snap = await db_fs.collection('exInfo').doc(exId).get();
+    return snap.exists ? snap.data() : null;
+  },
+
+  async getExerciseInfo(exId){
+    await ensureFirebaseReady(); return this.getExInfo(exId); },
+
+  // ── Videos desbloqueados por usuario ─────────────────────────────────────────
+  async getUnlockedVideos(uid){
+    await ensureFirebaseReady();
+    const snap = await db_fs.collection('users').doc(uid).get();
+    if(!snap.exists) return [];
+    const data = snap.data();
+    return Array.isArray(data.unlockedVideos) ? data.unlockedVideos : [];
+  },
+
+  async setUnlockedVideos(uid, videoKeys){
+    await ensureFirebaseReady();
+    await db_fs.collection('users').doc(uid).update({ unlockedVideos: videoKeys });
+    return true;
+  },
+
+  async saveExInfo(exId, data){
+    await ensureFirebaseReady();
+    await db_fs.collection('exInfo').doc(exId).set(data, {merge: true});
+    // Si el ejercicio existe en el catálogo global creado por el entrenador, actualizarlo también.
+    try{
+      await db_fs.collection('exerciseCatalog').doc(exId).update({...data, updatedAt: Date.now()});
+    }catch(e){}
+    return true;
+  },
+
+  async saveExerciseInfo(exId, data){
+    await ensureFirebaseReady(); return this.saveExInfo(exId, data); },
+
+  getDeletedExerciseIdsLocal(){
+    try{
+      const local = JSON.parse(localStorage.getItem('jf_deleted_exercises')||'[]');
+      return Array.isArray(local) ? Array.from(new Set(local.filter(Boolean))) : [];
+    }catch(e){ return []; }
+  },
+
+  cacheDeletedExerciseIds(ids){
+    try{
+      const clean = Array.from(new Set((ids||[]).filter(Boolean)));
+      localStorage.setItem('jf_deleted_exercises', JSON.stringify(clean));
+      if(typeof applyDeletedExerciseIds === 'function') applyDeletedExerciseIds(clean);
+      return clean;
+    }catch(e){ return ids||[]; }
+  },
+
+  async getDeletedExerciseIds(){
+    await ensureFirebaseReady();
+    // Lectura ligera: un solo documento, no escaneo de colecciones.
+    const local = this.getDeletedExerciseIdsLocal();
+    try{
+      const snap = await db_fs.collection('appMeta').doc('deletedExercises').get();
+      const data = snap.exists ? (snap.data() || {}) : {};
+      const idsField = data.ids || {};
+      const remote = Array.isArray(idsField)
+        ? idsField
+        : Object.keys(idsField).filter(k=>idsField[k]);
+      return this.cacheDeletedExerciseIds(local.concat(remote));
+    }catch(e){
+      console.warn('getDeletedExerciseIds compact cache fallback:', e);
+      return local;
+    }
+  },
+
+  refreshDeletedExerciseIds(){
+    try{ this.getDeletedExerciseIds().catch(e=>console.warn('refreshDeletedExerciseIds:', e)); }catch(e){}
+  },
+
+  watchDeletedExercises(cb){
+    // Listener liviano y diferido: no toca Firestore durante el primer render.
+    const emit = (ids)=>{
+      const clean = this.cacheDeletedExerciseIds(ids||[]);
+      if(typeof cb === 'function') cb(clean);
+    };
+    try{ emit(this.getDeletedExerciseIdsLocal()); }catch(e){}
+    return jfStartFirebaseWatch(()=>{
+      return db_fs.collection('appMeta').doc('deletedExercises').onSnapshot(snap=>{
+        const data = snap.exists ? (snap.data() || {}) : {};
+        const idsField = data.ids || {};
+        const ids = Array.isArray(idsField)
+          ? idsField
+          : Object.keys(idsField).filter(k=>idsField[k]);
+        emit(ids);
+      }, err=>console.warn('watchDeletedExercises compact error:', err));
+    }, 'watchDeletedExercises');
+  },
+
+  async deleteExerciseFromApp(exercise){
+    await ensureFirebaseReady();
+    const id = typeof exercise === 'string' ? exercise : (exercise && exercise.id);
+    if(!id) throw new Error('Ejercicio inválido.');
+    const ex = typeof exercise === 'string' ? {id} : (exercise||{});
+    const deletedBy = (auth && auth.currentUser && auth.currentUser.uid) || ex.deletedBy || '';
+    const tombstone = {
+      id,
+      name: ex.name || '',
+      category: ex.category || '',
+      deleted: true,
+      deletedAt: Date.now(),
+      deletedBy
+    };
+
+    // Documento compacto global para que todos oculten el ejercicio.
+    try{
+      await db_fs.collection('appMeta').doc('deletedExercises').set({
+        ids: {[id]: true},
+        updatedAt: Date.now()
+      }, {merge:true});
+    }catch(e){
+      console.warn('deleteExerciseFromApp appMeta:', e);
+    }
+
+    // Tombstone compatible con versiones anteriores.
+    try{
+      await db_fs.collection('exInfo').doc(id).set(tombstone, {merge:true});
+    }catch(e){
+      console.warn('deleteExerciseFromApp exInfo:', e);
+    }
+
+    // Si era ejercicio creado por entrenador, se retira del catálogo global.
+    try{ await db_fs.collection('exerciseCatalog').doc(id).delete(); }
+    catch(e){ console.warn('deleteExerciseFromApp exerciseCatalog delete:', e); }
+
+    try{
+      const local = JSON.parse(localStorage.getItem('jf_custom_exercises')||'[]').filter(x=>x&&x.id!==id);
+      localStorage.setItem('jf_custom_exercises', JSON.stringify(local));
+      const deleted = this.getDeletedExerciseIdsLocal();
+      if(!deleted.includes(id)) deleted.push(id);
+      this.cacheDeletedExerciseIds(deleted);
+    }catch(e){}
+    return true;
+  },
+
+  async getCustomExercises(){
+    await ensureFirebaseReady();
+    let items=[];
+
+    // Fuente principal: catálogo global. Lo que se cree aquí aparece para todos
+    // los entrenadores/clientes que carguen el catálogo.
+    try{
+      const q = await db_fs.collection('exerciseCatalog').where('global','==',true).get();
+      items = items.concat(q.docs.map(d=>({id:d.id,...d.data()})));
+    }catch(e){
+      console.warn('getCustomExercises exerciseCatalog error:', e);
+    }
+
+    // Compatibilidad con versiones anteriores que guardaban los ejercicios en exInfo.
+    try{
+      const q2 = await db_fs.collection('exInfo').where('isCustomExercise','==',true).get();
+      items = items.concat(q2.docs.map(d=>({id:d.id,...d.data()})));
+    }catch(e){
+      console.warn('getCustomExercises exInfo legacy error:', e);
+    }
+
+    // Fallback local solo para que el creador vea lo recién creado si hay latencia.
+    try{
+      const local = JSON.parse(localStorage.getItem('jf_custom_exercises')||'[]');
+      if(Array.isArray(local))items = items.concat(local);
+    }catch(e){}
+
+    const seen={};
+    return items.filter(x=>x&&x.id&&!x.deleted&&!seen[x.id]&&(seen[x.id]=true));
+  },
+
+  async saveCustomExercise(exercise, info){
+    await ensureFirebaseReady();
+    const now=Date.now();
+    const payload = {
+      ...exercise,
+      ...info,
+      id: exercise.id,
+      name: exercise.name || info.name || '',
+      category: exercise.category || info.category || '',
+      zone: exercise.zone || info.zone || 'Personalizado',
+      machine: exercise.machine || info.machine || 'Personalizado',
+      video: exercise.video || info.video || '',
+      customImg: exercise.customImg || info.customImg || info.image || '',
+      global: true,
+      isGlobalExercise: true,
+      isCustomExercise: true,
+      custom: true,
+      createdAt: info.createdAt || now,
+      updatedAt: now
+    };
+
+    // Guardado global del catálogo: todos leen de aquí.
+    // Si las reglas de Firestore aún no permiten esta colección nueva, no se rompe:
+    // exInfo queda como respaldo global compatible con la versión anterior.
+    try{
+      await db_fs.collection('exerciseCatalog').doc(payload.id).set(payload, {merge:true});
+    }catch(e){
+      console.warn('saveCustomExercise exerciseCatalog fallback to exInfo:', e);
+    }
+
+    // Guardado paralelo de info del ejercicio: descripción, imagen y links usados
+    // por ExerciseScreen, por la edición global existente y como respaldo global.
+    await db_fs.collection('exInfo').doc(payload.id).set(payload, {merge:true});
+
+    try{
+      const local = JSON.parse(localStorage.getItem('jf_custom_exercises')||'[]').filter(x=>x&&x.id!==payload.id);
+      local.push(payload);
+      localStorage.setItem('jf_custom_exercises', JSON.stringify(local));
+    }catch(e){}
+    return payload;
+  },
+
+  watchCustomExercises(cb){
+    return jfStartFirebaseWatch(function(){
+      return db_fs.collection('exerciseCatalog')
+        .where('global','==',true)
+        .onSnapshot(snap=>{
+          cb(snap.docs.map(d=>({id:d.id,...d.data()})).filter(x=>!x.deleted));
+        }, err=>console.warn('watchCustomExercises error:', err));
+    }, 'watchCustomExercises');
+  },
+
+  // ── Solicitudes de ayuda ──────────────────────────────────────────────────────
+  async postHelp(data){
+    await ensureFirebaseReady();
+    await db_fs.collection('helpRequests').doc(data.userId).set({
+      ...data,
+      status: 'pending',
+      createdAt: Date.now()
+    });
+    return true;
+  },
+
+  async requestHelp(data){
+    await ensureFirebaseReady(); return this.postHelp(data); },
+
+  async getHelpRequests(){
+    await ensureFirebaseReady();
+    const q = await db_fs.collection('helpRequests').where('status','==','pending').get();
+    return q.docs.map(d => d.data());
+  },
+
+  async resolveHelp(userId){
+    await ensureFirebaseReady();
+    await db_fs.collection('helpRequests').doc(userId).update({status: 'resolved'});
+    return true;
+  },
+
+  // Listener en tiempo real de solicitudes de ayuda
+  onHelpRequests(trainerUid, cb){
+    return jfStartFirebaseWatch(function(){
+      return db_fs.collection('helpRequests')
+        .where('status','==','pending')
+        .onSnapshot(snap => {
+          cb(snap.docs.map(d => d.data()));
+        });
+    }, 'onHelpRequests');
+  },
+
+  // ── Asistencia ────────────────────────────────────────────────────────────────
+  async setAtt(uid, day, status){
+    await ensureFirebaseReady();
+    const week = new Date().toISOString().slice(0,7);
+    // Guardar como objeto anidado real: { "2026-06": { lun: {...} } }
+    // Antes se usaba una clave con punto (`2026-06.lun`), pero getWeekAtt
+    // lee datos anidados; por eso el día no quedaba verde aunque se guardara.
+    await db_fs.collection('attendance').doc(uid).set({
+      [week]: {
+        [day]: {s: status, t: Date.now()}
+      }
+    }, {merge: true});
+    return true;
+  },
+
+  async getWeekAtt(uid){
+    await ensureFirebaseReady();
+    const week = new Date().toISOString().slice(0,7);
+    const snap = await db_fs.collection('attendance').doc(uid).get();
+    if(!snap.exists) return {};
+    const data = snap.data() || {};
+    const nested = data[week] || {};
+    // Compatibilidad con registros viejos guardados como "2026-06.lun".
+    const legacy = {};
+    Object.keys(data).forEach(k=>{
+      if(k.indexOf(week+'.')===0){
+        legacy[k.slice(week.length+1)] = data[k];
+      }
+    });
+    return Object.assign({}, legacy, nested);
+  },
+
+  // ── Logs de ejercicio ─────────────────────────────────────────────────────────
+  async getExerciseLog(uid, exId, date){
+    await ensureFirebaseReady();
+    const snap = await db_fs.collection('exerciseLogs').doc(uid).get();
+    if(!snap.exists) return null;
+    const data = snap.data() || {};
+    // Formato correcto: { "2026-06-07": { E001: {...} } }
+    const nested = (data[date] || {})[exId];
+    // Compatibilidad con logs viejos guardados como clave plana "2026-06-07.E001".
+    const legacy = data[`${date}.${exId}`];
+    return nested || legacy || null;
+  },
+
+  async saveExerciseLog(uid, exId, date, data){
+    await ensureFirebaseReady();
+    // Guardar como objeto anidado real para que getExerciseLog pueda leerlo.
+    await db_fs.collection('exerciseLogs').doc(uid).set({
+      [date]: {
+        [exId]: data
+      }
+    }, {merge: true});
+    return true;
+  },
+
+  // ── Stubs compatibilidad ──────────────────────────────────────────────────────
+  async updateActivity(uid, name){
+    await ensureFirebaseReady(); return true; },
+  async getActivity(){
+    await ensureFirebaseReady(); return []; },
+  watchUserProfile(uid, cb){
+    return jfStartFirebaseWatch(function(){
+      return db_fs.collection('users').doc(uid).onSnapshot(snap=>{
+        if(snap.exists && typeof cb==='function') cb(snap.data());
+      }, err=>console.warn('watchUserProfile error:', err));
+    }, 'watchUserProfile');
+  },
+  watchNote(uid, exId, cb){ return function(){}; },
+  watchExInfo(exId, cb){ return function(){}; },
+  watchMachineStatus(id, cb){ return function(){}; },
+  onExerciseNote(uid, exId, cb){ return function(){}; },
+  claimHelp(){ return true; },
+  unclaimHelp(){ return true; }
+};
+
+const EX_IMGS=window.JF_EX_IMGS||{};
+const CAT={
+"PECHO · HOMBRO · TRICEPS":[
+{id:"E001",name:"PUSH UP",zone:"Zona Funcional",machine:"Sin máquina",video:"https://goo.su/uFR8N"},
+{id:"E002",name:"PRESS INCLINADO",zone:"Zona Mancuernas",machine:"Banco inclinado + mancuernas",video:"https://goo.su/UtHrC"},
+{id:"E003",name:"PRESS PLANO",zone:"Zona Barras",machine:"Banco plano + barra",video:"https://goo.su/X5ncu1O",video2:"https://goo.su/SLjEBJ"},
+{id:"E004",name:"PRESS DECLINADO",zone:"Zona Barras",machine:"Banco declinado",video:"https://goo.su/g5lJzc",video2:"https://goo.su/ocVGPy"},
+{id:"E005",name:"PECK DECK",zone:"Zona Máquinas",machine:"Máquina Peck Deck",video:"https://goo.su/3dI7q"},
+{id:"E006",name:"CROSSOVER DE PIE",zone:"Zona Poleas",machine:"Polea doble alta",video:"https://goo.su/JAg2Oa"},
+{id:"E007",name:"APERTURA BANCO PLANO",zone:"Zona Mancuernas",machine:"Banco plano + mancuernas",video:"https://goo.su/PsBDXe"},
+{id:"E008",name:"VUELOS LATERALES",zone:"Zona Mancuernas",machine:"Mancuernas",video:"https://goo.su/vaUJO"},
+{id:"E009",name:"VUELOS FRONTALES",zone:"Zona Mancuernas",machine:"Mancuernas",video:"https://goo.su/n4eUNeX",video2:"https://goo.su/4azFY"},
+{id:"E010",name:"VUELOS INCLINADOS",zone:"Zona Mancuernas",machine:"Banco inclinado + mancuernas",video:"https://goo.su/Acki"},
+{id:"E011",name:"DELTOIDES POSTERIOR",zone:"Zona Mancuernas",machine:"Mancuernas",video:"https://goo.su/Jago"},
+{id:"E012",name:"PRESS MILITAR",zone:"Zona Barras",machine:"Barra / mancuernas",video:"https://goo.su/VnkYK",video2:"https://goo.su/xntgKz"},
+{id:"E013",name:"BARBELL CURL",zone:"Zona Barras",machine:"Barra recta",video:"https://goo.su/CIctM"},
+{id:"E014",name:"PUSH DOWN",zone:"Zona Poleas",machine:"Polea alta",video:"https://goo.su/IboRJD"},
+{id:"E015",name:"FONDOS ASISTIDOS",zone:"Zona Máquinas",machine:"Máq. fondos asistidos",video:"https://goo.su/zb7U9w"},
+{id:"E016",name:"PRESS FRANCES",zone:"Zona Mancuernas",machine:"Mancuernas / barra Z",video:"https://goo.su/6buIut",video2:"https://goo.su/IuGMte"},
+{id:"E017",name:"COPA CON POLEA",zone:"Zona Poleas",machine:"Polea baja",video:"https://goo.su/iD13kb0"},
+{id:"E018",name:"TRICEPS PATADA",zone:"Zona Mancuernas",machine:"Mancuerna",video:"https://goo.su/eyU1y"},
+{id:"E019",name:"COPA",zone:"Zona Mancuernas",machine:"Mancuerna",video:"https://goo.su/hyep9VS",video2:"https://goo.su/zIIlTp"},
+{id:"E020",name:"PRESS HOMBRO ROT",zone:"Zona Mancuernas",machine:"Mancuernas",video:"https://goo.su/Rtzfz"},
+{id:"E021",name:"PUSH UP PICA",zone:"Zona Funcional",machine:"Sin máquina",video:"https://goo.su/9wwns",video2:"https://goo.su/Dvalq"},
+{id:"E022",name:"PUSH UP DIAMANTE",zone:"Zona Funcional",machine:"Sin máquina",video:"https://goo.su/iuM3xWf"},
+{id:"E023",name:"GATEO EMPUJE SACO",zone:"Zona Funcional",machine:"Saco de empuje",video:"https://goo.su/UkDZoI"},
+{id:"E024",name:"PASE PECHO B.M",zone:"Zona Funcional",machine:"Balón medicinal",video:"https://goo.su/0IVYMzj"},
+{id:"E025",name:"ENTERRADORAS",zone:"Zona Funcional",machine:"Sin máquina",video:"https://goo.su/sEIoz9s"},
+{id:"E026",name:"PRESS OLIMPICO",zone:"Zona Barras",machine:"Barra olímpica",video:"https://goo.su/29xJiH3"},
+{id:"E027",name:"PUSH UP TRICEPS",zone:"Zona Funcional",machine:"Sin máquina",video:"https://goo.su/QBICTQh"},
+{id:"E028",name:"PRESS JABALINA",zone:"Zona Funcional",machine:"Barra",video:"https://goo.su/LkdyZXG"},
+],
+"ESPALDA · BICEPS":[
+{id:"E029",name:"DOMINADAS",zone:"Zona Barras Fijas",machine:"Barra de dominadas",video:"https://goo.su/hyfU9",video2:"https://goo.su/Vaw0u"},
+{id:"E030",name:"JALONES AL PECHO",zone:"Zona Poleas",machine:"Polea alta",video:"https://goo.su/AHA9f",video2:"https://goo.su/kw1AI"},
+{id:"E031",name:"HIPER EXTENSION H",zone:"Zona Máquinas",machine:"Banco hiper-extensión",video:"https://goo.su/rMavD",video2:"https://goo.su/1ptoTwj"},
+{id:"E032",name:"BARRA T",zone:"Zona Barras",machine:"Barra T",video:"https://sl1nk.com/z6xfakl"},
+{id:"E033",name:"BARRA T FUNCIONAL",zone:"Zona Barras",machine:"Barra T funcional",video:"https://sl1nk.com/aaioxk4"},
+{id:"E034",name:"REMO LIBRE",zone:"Zona Barras",machine:"Barra olímpica",video:"https://goo.su/Vk9nyG"},
+{id:"E035",name:"REMO HORIZONTAL",zone:"Zona Poleas",machine:"Polea baja",video:"https://goo.su/rYbmfyk"},
+{id:"E036",name:"REMO CON MANC",zone:"Zona Mancuernas",machine:"Mancuerna + banco",video:"https://goo.su/jA9Ib"},
+{id:"E037",name:"PULLOVER",zone:"Zona Mancuernas",machine:"Mancuerna + banco",video:"https://goo.su/Hr4W"},
+{id:"E038",name:"LUMBARES",zone:"Zona Máquinas",machine:"Banco romano 45°",video:"https://goo.su/BmDne"},
+{id:"E039",name:"CURL BAYESIAN",zone:"Zona Poleas",machine:"Polea baja",video:"https://goo.su/wka4EH"},
+{id:"E040",name:"CURL DE PIE BARRA",zone:"Zona Barras",machine:"Barra recta",video:"https://sl1nk.com/80l7agb"},
+{id:"E041",name:"PREDICADOR BANCO",zone:"Zona Barras",machine:"Banco predicador + barra",video:"https://goo.su/dkGhCD"},
+{id:"E042",name:"CURL CONCENTRADO",zone:"Zona Mancuernas",machine:"Mancuerna",video:"https://goo.su/btTB5C"},
+{id:"E043",name:"CURL DE PIE MARTILL",zone:"Zona Mancuernas",machine:"Mancuernas (sentado)",video:"https://goo.su/TnBUYTT"},
+{id:"E044",name:"CURL DE PIE POLEA",zone:"Zona Poleas",machine:"Polea baja",video:"https://goo.su/nLp7U"},
+{id:"E045",name:"ANTEBRAZO",zone:"Zona Mancuernas",machine:"Mancuerna / barra",video:"https://goo.su/7Dk5x",video2:"https://goo.su/5IWjr"},
+{id:"E046",name:"SPIDER CURL",zone:"Zona Mancuernas",machine:"Banco inclinado + mancuerna",video:"https://goo.su/qkTfY",video2:"https://goo.su/UVt9Q"},
+{id:"E047",name:"WAITER CURL",zone:"Zona Mancuernas",machine:"Mancuerna",video:"https://goo.su/Y9dzVaV"},
+{id:"E048",name:"REMO EN GATEO",zone:"Zona Funcional",machine:"Mancuerna / banda",video:"https://goo.su/BZsHA5"},
+{id:"E049",name:"CURL ACOSTADO",zone:"Zona Mancuernas",machine:"Mancuerna + banco",video:"https://goo.su/NDWsR"},
+{id:"E050",name:"BICEPS 3D MANC",zone:"Zona Mancuernas",machine:"Mancuerna",video:"https://goo.su/Dnj5zrW"},
+{id:"E051",name:"LANZAMIENTO B.M TE",zone:"Zona Funcional",machine:"Balón medicinal",video:"https://goo.su/3QyTG"},
+{id:"E052",name:"TRX",zone:"Zona Funcional",machine:"TRX / suspensión",video:"https://goo.su/o4wla"},
+{id:"E053",name:"FACE PULL SOGA",zone:"Zona Poleas",machine:"Polea alta + soga",video:"https://goo.su/CUOq37h"},
+{id:"E054",name:"ENCOGIMIENTOS",zone:"Zona Mancuernas",machine:"Mancuernas / barra",video:"https://goo.su/GhaYY",video2:"https://goo.su/CFDeE"},
+{id:"E055",name:"REMO ANCLADO",zone:"Zona Poleas",machine:"Polea baja anclada",video:"https://goo.su/xoYp6kk"},
+],
+"PIERNA":[
+{id:"E056",name:"SENTADILLA LIBRE",zone:"Zona Squat Rack",machine:"Barra + rack",video:"https://goo.su/pqdD"},
+{id:"E057",name:"SENTADILLA SMITH",zone:"Zona Máquinas",machine:"Máquina Smith",video:"https://goo.su/WcEDn"},
+{id:"E058",name:"PESO MUERTO",zone:"Zona Peso Libre",machine:"Barra olímpica",video:"https://goo.su/YHI6FB",video2:"https://goo.su/fcgzYr"},
+{id:"E059",name:"SENTADILLA HACKA",zone:"Zona Máquinas",machine:"Hack Squat Machine",video:"https://goo.su/ztJy"},
+{id:"E060",name:"HAMMER",zone:"Zona Máquinas",machine:"Máquina Hammer",video:"https://goo.su/CLXckj4"},
+{id:"E061",name:"PRENSA",zone:"Zona Máquinas",machine:"Prensa de pierna",video:"https://goo.su/hZJXZ"},
+{id:"E062",name:"LEG EXTENSIONES",zone:"Zona Máquinas",machine:"Máq. leg extension",video:"https://goo.su/84zMnz"},
+{id:"E063",name:"LEG CURL ACOSTADO",zone:"Zona Máquinas",machine:"Máq. leg curl acostado",video:"https://goo.su/BdS0T"},
+{id:"E064",name:"LEG CURL INCLINADO",zone:"Zona Máquinas",machine:"Máq. leg curl inclinado",video:"https://goo.su/JwCed"},
+{id:"E065",name:"TIJERA",zone:"Zona Peso Libre",machine:"Mancuernas / barra",video:"https://goo.su/XJRvP"},
+{id:"E066",name:"PISTOL SQUAD",zone:"Zona Funcional",machine:"Sin máquina",video:"https://goo.su/TGTTbAm"},
+{id:"E067",name:"ADUCTORES SENTADO",zone:"Zona Máquinas",machine:"Máq. aductores A90",video:"https://goo.su/0XUkJ6",video2:"https://goo.su/ohaf"},
+{id:"E068",name:"GLUTEO CON PATADA",zone:"Zona Poleas",machine:"Polea baja / cable",video:"https://goo.su/E0t7y0n"},
+{id:"E069",name:"PAT. BUTT BLOSTER",zone:"Zona Funcional",machine:"Sin máquina / banda",video:"https://goo.su/naPh4"},
+{id:"E070",name:"TOTAL HIP",zone:"Zona Máquinas",machine:"Máquina Total Hip",video:"https://sl1nk.com/nuaevow"},
+{id:"E071",name:"ADUCTORES DE PIE",zone:"Zona Poleas",machine:"Polea baja",video:"https://acesse.one/rttkb0r"},
+{id:"E072",name:"SENTADILLA BULGARA",zone:"Zona Peso Libre",machine:"Mancuernas + banco",video:"https://l1nq.com/tbboww8"},
+{id:"E073",name:"NORDICO",zone:"Zona Funcional",machine:"Barra fija / banco",video:"https://l1nq.com/u1mn3r5"},
+{id:"E074",name:"PANTORRILLA",zone:"Zona Máquinas",machine:"Máq. pantorrilla pie",video:"https://l1nq.com/cdlv0xy"},
+{id:"E075",name:"HIP TRUST",zone:"Zona Peso Libre",machine:"Barra + banco",video:"https://sl1nk.com/okxc3sj"},
+{id:"E076",name:"EXTENSION EN 4 APOYOS",zone:"Zona Funcional",machine:"Sin máquina",video:"https://sl1nk.com/uje2qti"},
+{id:"E077",name:"SENTADILLA SISSY",zone:"Zona Funcional",machine:"Soporte / sin máquina",video:"https://sl1nk.com/zi4idch"},
+{id:"E078",name:"KTB SWING 2 MANOS",zone:"Zona Funcional",machine:"Kettlebell",video:"https://sl1nk.com/dfptetb"},
+{id:"E079",name:"SENTADILLA GOBLET",zone:"Zona Funcional",machine:"Kettlebell / mancuerna",video:"https://sl1nk.com/mmpx1bc"},
+{id:"E080",name:"SENTADILLA SUMO",zone:"Zona Peso Libre",machine:"Barra / mancuerna",video:"https://sl1nk.com/x945dut"},
+{id:"E081",name:"BUENOS DIAS",zone:"Zona Barras",machine:"Barra olímpica",video:"https://acesse.one/qtp1dlf",video2:"https://l1nq.com/712lmhq"},
+{id:"E082",name:"STEP UP",zone:"Zona Funcional",machine:"Cajón / Hammer",video:"https://sl1nk.com/pndz9gm",video2:"https://l1nk.dev/boan4ki"},
+{id:"E083",name:"SLIDER CURL",zone:"Zona Funcional",machine:"Deslizadores",video:"https://l1nq.com/a9dfx28"},
+],
+"PILAR · ESTABILIDAD":[
+{id:"E084",name:"RANAS DE BANCA",zone:"Zona Core",machine:"Banco inclinado",video:"https://acesse.one/mps2yza"},
+{id:"E085",name:"ELEVACIONES DE PIERNAS",zone:"Zona Core",machine:"Barra fija / banca",video:"https://l1nq.com/lov46d0"},
+{id:"E086",name:"RECOGIMIENTO DE PIERNAS",zone:"Zona Core",machine:"Suelo / polea",video:"https://sl1nk.com/bf4rjbg"},
+{id:"E087",name:"RUSSIAN TWIST",zone:"Zona Core",machine:"Balón / mancuerna",video:"https://sl1nk.com/n40j513",video2:"https://l1nq.com/kno7auy",video3:"https://sl1nk.com/7477jrv"},
+{id:"E088",name:"CRUNCH BANCO PLANO",zone:"Zona Core",machine:"Banco plano",video:"https://l1nq.com/9catysw"},
+{id:"E089",name:"CRUNCH BANCO INCLINADO",zone:"Zona Core",machine:"Banco inclinado",video:"https://sl1nk.com/872tffa"},
+{id:"E090",name:"CRUNCH AB SHAPER",zone:"Zona Core",machine:"Ab Shaper",video:"https://sl1nk.com/playgpi"},
+{id:"E091",name:"LUMBAR FITBALL",zone:"Zona Core",machine:"Fitball",video:"https://l1nq.com/bwh5mep"},
+{id:"E092",name:"ABDOMEN FITBALL",zone:"Zona Core",machine:"Fitball",video:"https://l1nq.com/hseq7yq"},
+{id:"E093",name:"PLANCHAS ISO",zone:"Zona Core",machine:"Sin máquina",video:"https://l1nq.com/hdrqw21"},
+{id:"E094",name:"PLANCHAS DINAMICAS",zone:"Zona Core",machine:"Sin máquina",video:"https://acesse.one/3fs7il7"},
+{id:"E095",name:"OBLICUOS CRUNCH",zone:"Zona Core",machine:"Sin máquina",video:"https://l1nq.com/e9hqeab"},
+{id:"E096",name:"ESCALADORES",zone:"Zona Core",machine:"Sin máquina",video:"https://sl1nk.com/d5uq3p2"},
+{id:"E097",name:"GET UP TO TALL SIT",zone:"Zona Core",machine:"Sin máquina",video:"https://acesse.one/90jnbh6"},
+{id:"E098",name:"CAMINATA DEL GRANJERO",zone:"Zona Funcional",machine:"Mancuernas / pesas",video:"https://l1nq.com/vyl7a3m"},
+{id:"E099",name:"HALF TURKISH GET UP",zone:"Zona Funcional",machine:"Kettlebell",video:"https://acesse.one/geq3w4l"},
+{id:"E100",name:"TURKISH GET UP",zone:"Zona Funcional",machine:"Kettlebell",video:"https://sl1nk.com/e2w50nr"},
+{id:"E101",name:"GATEO SUPERMAN",zone:"Zona Core",machine:"Sin máquina",video:"https://sl1nk.com/p0z0cwa"},
+{id:"E102",name:"ROTACION OBLICUO",zone:"Zona Core",machine:"Balón / polea",video:"https://sl1nk.com/p0z0cwa"},
+{id:"E103",name:"HIPER INVERSO",zone:"Zona Core",machine:"Banco / máquina",video:"https://sl1nk.com/p0z0cwa"},
+{id:"E104",name:"TALL KNEELING KTB HALO",zone:"Zona Funcional",machine:"Kettlebell",video:"https://sl1nk.com/0qtjsy8"},
+{id:"E105",name:"AZOTES BM ROTACION",zone:"Zona Funcional",machine:"Balón medicinal",video:"https://sl1nk.com/4brjnor"},
+{id:"E106",name:"HOLLOW ROCK",zone:"Zona Core",machine:"Sin máquina",video:"https://sl1nk.com/l9aowo2"},
+{id:"E107",name:"PALL OF PRESS",zone:"Zona Poleas",machine:"Polea",video:"https://sl1nk.com/wglot8t"},
+{id:"E108",name:"GATEO CON FITBALL",zone:"Zona Core",machine:"Fitball",video:"https://sl1nk.com/xflfb4k"},
+{id:"E109",name:"BACK EXTENSION",zone:"Zona Máquinas",machine:"Banco romano",video:"https://l1nq.com/eqo2uu5"},
+{id:"E110",name:"RUEDA ABDOMINAL",zone:"Zona Core",machine:"Rueda abdominal",video:"https://l1nq.com/ukzis8p"},
+{id:"E111",name:"CRUNCH POLEA",zone:"Zona Poleas",machine:"Polea alta",video:"https://l1nq.com/toagaod"},
+],
+"MOVILIDAD":[
+{id:"E112",name:"POSTERIORES",zone:"Zona Stretching",machine:"Sin máquina",video:"https://goo.su/Jago"},
+{id:"E113",name:"90-90",zone:"Zona Stretching",machine:"Sin máquina",video:"https://fitnessprogramer.com/exercise/90-90-hip-stretch/"},
+{id:"E114",name:"90-90 UNA PIERNA",zone:"Zona Stretching",machine:"Sin máquina",video:"https://www.lyfta.app/es/exercise/estiramiento-de-isquiotibiales-sentado-con-una-sola-pierna-6so"},
+{id:"E115",name:"ADUCTORES",zone:"Zona Stretching",machine:"Sin máquina",video:"https://www.kettlebellkings.com/blogs/default-blog/side-lunges"},
+{id:"E116",name:"ACOSTADO MOV LUMBAR",zone:"Zona Stretching",machine:"Sin máquina",video:"https://youtu.be/FWH22O-t5eE?si=QFSHMPmFTJ5k3SAf"},
+{id:"E117",name:"CUADRUPEDO ROTACION COLUMNA",zone:"Zona Stretching",machine:"Sin máquina",video:"https://youtu.be/iWxGRsCGURM?si=-pMH0EyP6jLRHlZk"},
+{id:"E118",name:"CORRECTIVO PESO MUERTO",zone:"Zona Stretching",machine:"Sin máquina",video:"https://youtu.be/Ct5SKobPBy8?si=iDzrEaKHPqoKJa0A"},
+{id:"E119",name:"MEDIO ARRODILLADO ROT.-TORAX",zone:"Zona Stretching",machine:"Sin máquina",video:"https://youtu.be/pvWRd-JinBs?si=y3WdGIin73QENfyF"},
+{id:"E120",name:"CURL DE TIBIALES",zone:"Zona Stretching",machine:"Sin máquina"},
+{id:"E121",name:"CRUNCH MARIPOSA",zone:"Zona Stretching",machine:"Sin máquina"},
+{id:"E122",name:"BRETTZEL",zone:"Zona Stretching",machine:"Sin máquina"},
+{id:"E123",name:"MEDIO ARRODILLADO FLEXORES",zone:"Zona Stretching",machine:"Sin máquina"},
+{id:"E124",name:"CERVICAL",zone:"Zona Stretching",machine:"Sin máquina / pared"},
+{id:"E125",name:"BRETTZEL 2.0",zone:"Zona Stretching",machine:"Sin máquina"},
+{id:"E126",name:"ADUCTOR MEDIO ARRODILLADO",zone:"Zona Stretching",machine:"Sin máquina"},
+{id:"E127",name:"PECTORAL EN PARED",zone:"Zona Stretching",machine:"Pared"},
+{id:"E128",name:"PECTORAL BOCA ABAJO",zone:"Zona Stretching",machine:"Sin máquina"},
+{id:"E129",name:"PERRO-GATO",zone:"Zona Stretching",machine:"Sin máquina"},
+{id:"E130",name:"TOE TOUCH",zone:"Zona Stretching",machine:"Sin máquina"},
+{id:"E131",name:"DORSAL CON BANDA",zone:"Zona Stretching",machine:"Banda elástica"},
+{id:"E132",name:"CIRCULOS EN PISO MUNECAS",zone:"Zona Stretching",machine:"Sin máquina"},
+{id:"E133",name:"GLUTEO 90 ADELANTE",zone:"Zona Stretching",machine:"Sin máquina"},
+{id:"E134",name:"HOMBRO ROTA INT-EXT",zone:"Zona Stretching",machine:"Banda / sin máquina"},
+{id:"E135",name:"DORSAL CONTRACCION",zone:"Zona Stretching",machine:"Banda / pared"},
+{id:"E136",name:"SALTO FRONTAL - BAND",zone:"Zona Stretching",machine:"Banda elástica"},
+{id:"E137",name:"STRENGTH WITH BAND",zone:"Zona Stretching",machine:"Banda elástica"},
+{id:"E138",name:"UPPER BODY STRETCH",zone:"Zona Stretching",machine:"Sin máquina / pared"},
+{id:"E139",name:"MEJOR ESTIRAMIENTO DEL MUNDO",zone:"Zona Stretching",machine:"Sin máquina"},
+],
+"CARDIO · VASCULAR":[
+{id:"E140",name:"BURPEES",zone:"Zona Cardio",machine:"Sin máquina"},
+{id:"E141",name:"DESPLAZAMIENTOS CONOS",zone:"Zona Cardio",machine:"Conos"},
+{id:"E142",name:"BEAR CRAWL",zone:"Zona Cardio",machine:"Sin máquina"},
+{id:"E143",name:"SKIPPING",zone:"Zona Cardio",machine:"Sin máquina"},
+{id:"E144",name:"SALTO DE CUERDA",zone:"Zona Cardio",machine:"Cuerda"},
+{id:"E145",name:"THRUSTER",zone:"Zona Cardio",machine:"Barra / mancuernas"},
+{id:"E146",name:"JUMPING JACKS",zone:"Zona Cardio",machine:"Sin máquina"},
+{id:"E147",name:"AZOTES DE BALÓN MEDICINAL",zone:"Zona Cardio",machine:"Balón medicinal"},
+{id:"E148",name:"OVER HEAD",zone:"Zona Cardio",machine:"Barra / mancuernas"},
+{id:"E149",name:"BOX JUMP",zone:"Zona Cardio",machine:"Cajón pliométrico"},
+{id:"E150",name:"PATINADORES",zone:"Zona Cardio",machine:"Sin máquina"},
+{id:"E151",name:"SPRINT BANDA POTENCIA",zone:"Zona Cardio",machine:"Banda de resistencia"},
+{id:"E152",name:"CUERDA DE BATIDA",zone:"Zona Cardio",machine:"Battle ropes"},
+{id:"E153",name:"MINI TRAMPOLÍN",zone:"Zona Cardio",machine:"Mini trampolín"},
+{id:"E154",name:"STEP",zone:"Zona Cardio",machine:"Step / cajón"},
+{id:"E155",name:"ESCALERA DE COORDINACIÓN",zone:"Zona Cardio",machine:"Escalera de agilidad"},
+{id:"E156",name:"SACO DE BOXEO",zone:"Zona Cardio",machine:"Saco de boxeo"},
+],
+};
+
+CAT["ESTIRAMIENTO"]=CAT["ESTIRAMIENTO"]||[];
+
+// ─── MuscleWiki URL slugs (todos verificados) ─────────────────────────────────
+const MW_URL={
+  E001:"https://musclewiki.com/exercise/push-up",
+  E002:"https://musclewiki.com/exercise/dumbbell-incline-bench-press",
+  E003:"https://musclewiki.com/exercise/barbell-bench-press",
+  E004:"https://musclewiki.com/exercise/barbell-decline-bench-press",
+  E005:"https://musclewiki.com/exercise/machine-pec-fly",
+  E006:"https://musclewiki.com/exercise/cable-crossover",
+  E007:"https://musclewiki.com/exercise/dumbbell-fly",
+  E008:"https://musclewiki.com/exercise/dumbbell-lateral-raise",
+  E009:"https://musclewiki.com/exercise/dumbbell-front-raise",
+  E010:"https://musclewiki.com/exercise/dumbbell-incline-fly",
+  E011:"https://musclewiki.com/exercise/dumbbell-rear-delt-fly",
+  E012:"https://musclewiki.com/exercise/barbell-overhead-press",
+  E013:"https://musclewiki.com/exercise/barbell-curl",
+  E014:"https://musclewiki.com/exercise/cable-tricep-pushdown",
+  E015:"https://musclewiki.com/exercise/dip",
+  E016:"https://musclewiki.com/exercise/ez-bar-skull-crusher",
+  E017:"https://musclewiki.com/exercise/cable-overhead-tricep-extension",
+  E018:"https://musclewiki.com/exercise/dumbbell-tricep-kickback",
+  E019:"https://musclewiki.com/exercise/dumbbell-overhead-tricep-extension",
+  E020:"https://musclewiki.com/exercise/dumbbell-arnold-press",
+  E021:"https://musclewiki.com/exercise/pike-push-up",
+  E022:"https://musclewiki.com/exercise/diamond-push-up",
+  E023:"https://musclewiki.com/exercise/mountain-climber",
+  E024:"https://musclewiki.com/exercise/push-up",
+  E025:"https://musclewiki.com/exercise/burpee",
+  E026:"https://musclewiki.com/exercise/barbell-overhead-press",
+  E027:"https://musclewiki.com/exercise/close-grip-push-up",
+  E028:"https://musclewiki.com/exercise/barbell-overhead-press",
+  E029:"https://musclewiki.com/exercise/pull-up",
+  E030:"https://musclewiki.com/exercise/lat-pulldown",
+  E031:"https://musclewiki.com/exercise/back-extension",
+  E032:"https://musclewiki.com/exercise/t-bar-row",
+  E033:"https://musclewiki.com/exercise/t-bar-row",
+  E034:"https://musclewiki.com/exercise/barbell-bent-over-row",
+  E035:"https://musclewiki.com/exercise/seated-cable-row",
+  E036:"https://musclewiki.com/exercise/dumbbell-row",
+  E037:"https://musclewiki.com/exercise/dumbbell-pullover",
+  E038:"https://musclewiki.com/exercise/back-extension",
+  E039:"https://musclewiki.com/exercise/cable-curl",
+  E040:"https://musclewiki.com/exercise/barbell-curl",
+  E041:"https://musclewiki.com/exercise/preacher-curl",
+  E042:"https://musclewiki.com/exercise/dumbbell-concentration-curl",
+  E043:"https://musclewiki.com/exercise/dumbbell-hammer-curl",
+  E044:"https://musclewiki.com/exercise/cable-curl",
+  E045:"https://musclewiki.com/exercise/barbell-wrist-curl",
+  E046:"https://musclewiki.com/exercise/spider-curl",
+  E047:"https://musclewiki.com/exercise/dumbbell-curl",
+  E048:"https://musclewiki.com/exercise/dumbbell-row",
+  E049:"https://musclewiki.com/exercise/incline-dumbbell-curl",
+  E050:"https://musclewiki.com/exercise/dumbbell-curl",
+  E051:"https://musclewiki.com/exercise/medicine-ball-slam",
+  E052:"https://musclewiki.com/exercise/pull-up",
+  E053:"https://musclewiki.com/exercise/cable-face-pull",
+  E054:"https://musclewiki.com/exercise/barbell-shrug",
+  E055:"https://musclewiki.com/exercise/seated-cable-row",
+  E056:"https://musclewiki.com/exercise/barbell-squat",
+  E057:"https://musclewiki.com/exercise/smith-machine-squat",
+  E058:"https://musclewiki.com/exercise/barbell-deadlift",
+  E059:"https://musclewiki.com/exercise/hack-squat",
+  E060:"https://musclewiki.com/exercise/leg-press",
+  E061:"https://musclewiki.com/exercise/leg-press",
+  E062:"https://musclewiki.com/exercise/leg-extension",
+  E063:"https://musclewiki.com/exercise/lying-leg-curl",
+  E064:"https://musclewiki.com/exercise/seated-leg-curl",
+  E065:"https://musclewiki.com/exercise/dumbbell-lunge",
+  E066:"https://musclewiki.com/exercise/pistol-squat",
+  E067:"https://musclewiki.com/exercise/machine-hip-adduction",
+  E068:"https://musclewiki.com/exercise/cable-kickback",
+  E069:"https://musclewiki.com/exercise/cable-kickback",
+  E070:"https://musclewiki.com/exercise/machine-hip-abduction",
+  E071:"https://musclewiki.com/exercise/machine-hip-adduction",
+  E072:"https://musclewiki.com/exercise/dumbbell-bulgarian-split-squat",
+  E073:"https://musclewiki.com/exercise/nordic-hamstring-curl",
+  E074:"https://musclewiki.com/exercise/standing-calf-raise",
+  E075:"https://musclewiki.com/exercise/barbell-hip-thrust",
+  E076:"https://musclewiki.com/exercise/quadruped-hip-extension",
+  E077:"https://musclewiki.com/exercise/sissy-squat",
+  E078:"https://musclewiki.com/exercise/kettlebell-swing",
+  E079:"https://musclewiki.com/exercise/goblet-squat",
+  E080:"https://musclewiki.com/exercise/sumo-squat",
+  E081:"https://musclewiki.com/exercise/barbell-good-morning",
+  E082:"https://musclewiki.com/exercise/dumbbell-step-up",
+  E083:"https://musclewiki.com/exercise/nordic-hamstring-curl",
+  E084:"https://musclewiki.com/exercise/crunch",
+  E085:"https://musclewiki.com/exercise/hanging-leg-raise",
+  E086:"https://musclewiki.com/exercise/lying-leg-raise",
+  E087:"https://musclewiki.com/exercise/russian-twist",
+  E088:"https://musclewiki.com/exercise/crunch",
+  E089:"https://musclewiki.com/exercise/decline-crunch",
+  E090:"https://musclewiki.com/exercise/crunch",
+  E091:"https://musclewiki.com/exercise/stability-ball-crunch",
+  E092:"https://musclewiki.com/exercise/stability-ball-crunch",
+  E093:"https://musclewiki.com/exercise/plank",
+  E094:"https://musclewiki.com/exercise/plank",
+  E095:"https://musclewiki.com/exercise/oblique-crunch",
+  E096:"https://musclewiki.com/exercise/mountain-climber",
+  E097:"https://musclewiki.com/exercise/sit-up",
+  E098:"https://musclewiki.com/exercise/farmers-walk",
+  E099:"https://musclewiki.com/exercise/turkish-get-up",
+  E100:"https://musclewiki.com/exercise/turkish-get-up",
+  E101:"https://musclewiki.com/exercise/superman",
+  E102:"https://musclewiki.com/exercise/cable-wood-chop",
+  E103:"https://musclewiki.com/exercise/back-extension",
+  E104:"https://musclewiki.com/exercise/kettlebell-halo",
+  E105:"https://musclewiki.com/exercise/medicine-ball-slam",
+  E106:"https://musclewiki.com/exercise/plank",
+  E107:"https://musclewiki.com/exercise/pallof-press",
+  E108:"https://musclewiki.com/exercise/ab-wheel-rollout",
+  E109:"https://musclewiki.com/exercise/back-extension",
+  E110:"https://musclewiki.com/exercise/ab-wheel-rollout",
+  E111:"https://musclewiki.com/exercise/cable-crunch",
+  E112:"https://musclewiki.com/exercise/hamstring-stretch",
+  E113:"https://musclewiki.com/exercise/hip-stretch",
+  E114:"https://musclewiki.com/exercise/hip-stretch",
+  E115:"https://musclewiki.com/exercise/butterfly-stretch",
+  E116:"https://musclewiki.com/exercise/lumbar-rotation-stretch",
+  E117:"https://musclewiki.com/exercise/thoracic-rotation",
+  E118:"https://musclewiki.com/exercise/barbell-deadlift",
+  E119:"https://musclewiki.com/exercise/thoracic-rotation",
+  E120:"https://musclewiki.com/exercise/tibialis-raise",
+  E121:"https://musclewiki.com/exercise/butterfly-stretch",
+  E122:"https://musclewiki.com/exercise/hip-stretch",
+  E123:"https://musclewiki.com/exercise/hip-flexor-stretch",
+  E124:"https://musclewiki.com/exercise/neck-stretch",
+  E125:"https://musclewiki.com/exercise/hip-stretch",
+  E126:"https://musclewiki.com/exercise/adductor-stretch",
+  E127:"https://musclewiki.com/exercise/pec-stretch",
+  E128:"https://musclewiki.com/exercise/pec-stretch",
+  E129:"https://musclewiki.com/exercise/cat-cow",
+  E130:"https://musclewiki.com/exercise/toe-touch",
+  E131:"https://musclewiki.com/exercise/lat-stretch",
+  E132:"https://musclewiki.com/exercise/wrist-stretch",
+  E133:"https://musclewiki.com/exercise/pigeon-pose",
+  E134:"https://musclewiki.com/exercise/shoulder-stretch",
+  E135:"https://musclewiki.com/exercise/lat-stretch",
+  E136:"https://musclewiki.com/exercise/jump-rope",
+  E137:"https://musclewiki.com/exercise/resistance-band-pull-apart",
+  E138:"https://musclewiki.com/exercise/upper-body-stretch",
+  E139:"https://musclewiki.com/exercise/worlds-greatest-stretch",
+  E140:"https://musclewiki.com/exercise/burpee",
+  E141:"https://musclewiki.com/exercise/mountain-climber",
+  E142:"https://musclewiki.com/exercise/mountain-climber",
+  E143:"https://musclewiki.com/exercise/high-knees",
+  E144:"https://musclewiki.com/exercise/jump-rope",
+  E145:"https://musclewiki.com/exercise/barbell-thruster",
+  E146:"https://musclewiki.com/exercise/jumping-jack",
+  E147:"https://musclewiki.com/exercise/medicine-ball-slam",
+  E148:"https://musclewiki.com/exercise/barbell-overhead-press",
+  E149:"https://musclewiki.com/exercise/box-jump",
+  E150:"https://musclewiki.com/exercise/speed-skater",
+  E151:"https://musclewiki.com/exercise/sprint",
+  E152:"https://musclewiki.com/exercise/battle-rope",
+  E153:"https://musclewiki.com/exercise/jump-rope",
+  E154:"https://musclewiki.com/exercise/dumbbell-step-up",
+  E155:"https://musclewiki.com/exercise/high-knees",
+  E156:"https://musclewiki.com/exercise/burpee"
+};
+;
+// Flatten exercises
+
+const ALL_EXERCISES = Object.values(CAT).filter(Array.isArray).flat();
+function getEx(id){return Object.values(CAT).filter(Array.isArray).flat().find(e=>e.id===id);}
+function catColor(cat){
+  const colors={'PECHO · HOMBRO · TRICEPS':'#ef4444','ESPALDA · BICEPS':'#3b82f6','PIERNA':'#22c55e','GLÚTEO':'#a855f7','PILAR · ESTABILIDAD':'#f59e0b','MOVILIDAD':'#06b6d4','CARDIO · VASCULAR':'#00bcd4','ESTIRAMIENTO':'#14b8a6'};
+  return colors[cat]||'#64748b';
+}
+function exColor(exId){
+  for(const [cat,exs] of Object.entries(CAT)){ if(Array.isArray(exs) && exs.find(e=>e.id===exId)) return catColor(cat); }
+  return '#64748b';
+}
+function getCategoryOptions(){
+  return Object.keys(CAT).filter(k=>Array.isArray(CAT[k]));
+}
+const DELETED_EXERCISES = {};
+function isExerciseDeleted(id){ return !!(id && DELETED_EXERCISES[id]); }
+function removeExerciseFromCatalogLocal(id){
+  if(!id)return;
+  Object.keys(CAT).forEach(cat=>{
+    if(Array.isArray(CAT[cat])) CAT[cat] = CAT[cat].filter(ex=>ex && ex.id!==id);
+  });
+}
+function applyDeletedExerciseIds(ids){
+  if(!Array.isArray(ids))return;
+  ids.filter(Boolean).forEach(id=>{
+    DELETED_EXERCISES[id]=true;
+    removeExerciseFromCatalogLocal(id);
+  });
+}
+function mergeCustomExercises(customs){
+  if(!Array.isArray(customs))return;
+  customs.forEach(raw=>{
+    if(!raw || !raw.id || !raw.name || raw.deleted || isExerciseDeleted(raw.id))return;
+    const cat = raw.category || raw.cat || getCategoryOptions()[0];
+    if(!cat || !CAT[cat])return;
+    const ex = {
+      id: raw.id,
+      name: raw.name,
+      zone: raw.zone || 'Personalizado',
+      machine: raw.machine || 'Personalizado',
+      video: raw.video || (raw.links&&raw.links[0]&&raw.links[0].url) || '',
+      category: cat,
+      custom: true,
+      customImg: raw.customImg || raw.image || ''
+    };
+    const idx = CAT[cat].findIndex(e=>e.id===ex.id);
+    if(idx>=0)CAT[cat][idx]={...CAT[cat][idx],...ex};
+    else CAT[cat].push(ex);
+  });
+}
+function defaultNewExerciseDraft(){
+  return {name:'',category:getCategoryOptions()[0]||'',image:'',link:'',description:''};
+}
+
+// ─── LOGO ─────────────────────────────────────────────────────────────────────
+
+const LOGO_SRC=window.JF_LOGO_SRC||"";
+;
+
+// ─── TRAINERS ─────────────────────────────────────────────────────────────────
+
+const IMG_PLACEHOLDER=window.JF_IMG_PLACEHOLDER||"";
+
+function getExerciseImage(ex, info){
+  if(!ex)return null;
+  return (info&&info.customImg) || ex.customImg || ex.image || EX_IMGS[ex.id] || null;
+}
+function getExerciseName(ex, info){
+  if(!ex)return '';
+  return (info&&info.name) || ex.name || '';
+}
+function compressImageFile(file, cb, onErr){
+  if(!file)return;
+  const reader = new FileReader();
+  reader.onerror = ()=>{ if(onErr)onErr(); };
+  reader.onload = ()=>{
+    const img = new Image();
+    img.onerror = ()=>cb(reader.result);
+    img.onload = ()=>{
+      try{
+        const max = 700;
+        let w = img.width || max, h = img.height || max;
+        if(w>h && w>max){ h = Math.round(h*max/w); w = max; }
+        else if(h>=w && h>max){ w = Math.round(w*max/h); h = max; }
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img,0,0,w,h);
+        cb(canvas.toDataURL('image/jpeg',0.76));
+      }catch(e){ cb(reader.result); }
+    };
+    img.src = reader.result;
+  };
+  reader.readAsDataURL(file);
+}
+
+function getTrainerTheme(idx){ return {color:'#00bcd4',light:'#152535'}; }
+const DAY_KEYS = ["lun","mar","mie","jue","vie","sab","dom"];
+const DAY_LABELS = {lun:"Lunes",mar:"Martes",mie:"Miercoles",jue:"Jueves",vie:"Viernes",sab:"Sabado",dom:"Domingo"};
+const DAY_SHORT = {lun:"L",mar:"M",mie:"Mi",jue:"J",vie:"V",sab:"S",dom:"D"};
+
+function isAccessBlocked(user){
+  return !!(user && (user.accessStatus==='blocked' || user.accessBlocked===true || user.paymentStatus==='blocked' || user.paymentStatus==='overdue'));
+}
+function getAccessStatus(user){
+  return isAccessBlocked(user) ? 'blocked' : 'active';
+}
+function accessBadgeStyle(user){
+  const blocked=isAccessBlocked(user);
+  return {display:'inline-flex',alignItems:'center',gap:4,borderRadius:999,padding:'3px 8px',fontSize:9,fontWeight:900,letterSpacing:'.04em',background:blocked?'#ef444420':'#16a34a20',border:'1px solid '+(blocked?'#ef444455':'#16a34a55'),color:blocked?'#fca5a5':'#86efac'};
+}
+function accessLabel(user){
+  return isAccessBlocked(user)?'ACCESO BLOQUEADO':'ACCESO ACTIVO';
+}
+
+// ─── ERROR BOUNDARY ──────────────────────────────────────────────────────────
+class ErrorBoundary extends React.Component {
+  constructor(props){ super(props); this.state={error:null}; }
+  static getDerivedStateFromError(e){ return {error:e}; }
+  componentDidCatch(e,info){ console.error('[CRASH] error:', e, info); }
+  render(){
+    if(this.state.error) return React.createElement('div',{style:{padding:30,color:'#ef4444',fontWeight:700,fontSize:14}},
+      'Error al renderizar: ' + this.state.error.message
+    );
+    return this.props.children;
+  }
+}
+
+// ─── APP ──────────────────────────────────────────────────────────────────────
+
+// ─── INICIALIZACIÓN ENTRENADOR JUANDA (solo primera vez) ─────────────────────
+(async function initTrainer(){
+  // El documento del trainer se crea manualmente en Firestore
+  // Esta función solo verifica silenciosamente
+  try{
+    const snap = await db_fs.collection('users').where('role','==','trainer').limit(1).get();
+    if(!snap.empty){ console.log('Trainer encontrado en Firestore'); }
+  }catch(e){ /* Sin permisos aún — normal antes del login */ }
+})();
+
+let useState, useEffect, useRef, useCallback;
+
+function App(){
+  // authReady: false mientras Firebase verifica sesión inicial
+  const [authReady, setAuthReady] = useState(false);
+  const [user, setUser] = useState(null);
+  const [trainer, setTrainer] = useState(null);
+  const [exImgsTick, setExImgsTick] = useState(0);
+
+  useEffect(()=>{
+    const refresh = ()=>setExImgsTick(x=>x+1);
+    window.addEventListener('jf-ex-imgs-ready', refresh);
+    return ()=>window.removeEventListener('jf-ex-imgs-ready', refresh);
+  },[]);
+
+  // Catálogo global diferido: no bloquea la pantalla inicial.
+  useEffect(()=>{
+    let mounted=true;
+    let unsub=null;
+    const timer=setTimeout(async ()=>{
+      try{
+        await ensureFirebaseReady();
+        const customs = await DB.getCustomExercises();
+        if(mounted) mergeCustomExercises(customs);
+        unsub = DB.watchCustomExercises(customs=>{
+          if(mounted) mergeCustomExercises(customs||[]);
+        });
+      }catch(e){
+        console.warn('global exercise catalog deferred load error:', e);
+      }
+    }, 7000);
+    return ()=>{mounted=false; clearTimeout(timer); if(typeof unsub==='function')unsub();};
+  },[]);
+
+  useEffect(()=>{
+    // Arranque ultrarrápido: mostrar la app inmediatamente y restaurar sesión después.
+    let cancelled=false;
+    let unsubAuth=null;
+    setAuthReady(true);
+
+    const restoreTimer = setTimeout(async ()=>{
+      try{
+        await ensureFirebaseReady();
+        if(cancelled || !auth) return;
+        unsubAuth = auth.onAuthStateChanged(async (firebaseUser) => {
+          try{
+            if(firebaseUser){
+              const doc = await DB.getUserByUid(firebaseUser.uid);
+              if(doc && doc.role==='trainer'){
+                const theme = getTrainerTheme(0);
+                setTrainer({...doc,...theme});
+                setUser(null);
+              } else if(doc && doc.role==='user'){
+                setUser(doc);
+                setTrainer(null);
+              }
+            } else {
+              const savedEmail = localStorage.getItem('jf_current_session');
+              if(savedEmail){
+                try{
+                  const doc = await DB.getUserByEmail(savedEmail);
+                  if(doc && doc.role==='trainer'){
+                    const theme = getTrainerTheme(0);
+                    setTrainer({...doc,...theme});
+                    setUser(null);
+                  }
+                }catch(e){ console.warn('trainer session restore:',e); }
+              }
+            }
+          }catch(e){ console.warn('session restore error',e); }
+          setAuthReady(true);
+        });
+      }catch(e){
+        console.warn('Firebase se cargará al iniciar sesión:', e);
+        setAuthReady(true);
+      }
+    }, 1800);
+
+    return ()=>{ cancelled=true; clearTimeout(restoreTimer); if(typeof unsubAuth==='function')unsubAuth(); };
+  },[]);
+
+  // Derivar pantalla del estado, no de una variable separada
+  const scr = !authReady ? 'splash'
+    : trainer ? 'trainer'
+    : user    ? 'home'
+    : 'choose';
+  const setScr = (s)=>{ if(s==='choose'||s==='login'||s==='trainer_login') _setNavScr(s); };
+  const [navScr, _setNavScr] = useState(function(){
+    var s = (typeof window !== 'undefined') ? window.__JF_FAST_NAV : null;
+    return (s==='login'||s==='trainer_login') ? s : null;
+  });
+  const efectiveScr = (navScr && !trainer && !user) ? navScr : scr;
+
+  // Real-time profile listener — actualiza sin cerrar sesión
+  useEffect(()=>{
+    if(!user || !user.uid) return;
+    const unsub = DB.watchUserProfile(user.uid, data=>{
+      setUser(prev=>prev?{...prev,...data}:data);
+    });
+    return ()=>{ if(typeof unsub==='function') unsub(); };
+  },[user&&user.uid]);
+
+  // Activity ping
+  useEffect(()=>{
+    if(!user || !user.uid) return;
+    DB.updateActivity(user.uid, user.name);
+    const iv = setInterval(()=>DB.updateActivity(user.uid, user.name), 30000);
+    return ()=>clearInterval(iv);
+  },[user&&user.uid]);
+
+  async function logout(){
+    const email = localStorage.getItem('jf_current_session');
+    if(email) await DB.logoutUser(email);
+    localStorage.removeItem('jf_current_session');
+    setUser(null); setTrainer(null); _setNavScr(null);
+  }
+
+  if(efectiveScr==='splash') return React.createElement(Splash);
+  if(efectiveScr==='trainer') return React.createElement(TrainerPanel,{trainer,onLogout:logout});
+  if(efectiveScr==='home')    return React.createElement(HomeScreen,{user,onLogout:logout,updateUser:setUser});
+  if(efectiveScr==='login')   return React.createElement(LoginScreen,{onBack:()=>_setNavScr(null),onLogin:(tr,u)=>{if(tr){setTrainer(tr);setUser(null);}else{setUser(u);setTrainer(null);}}});
+  if(efectiveScr==='trainer_login') return React.createElement(TrainerLoginScreen,{onBack:()=>_setNavScr(null),onLogin:(tr,u)=>{if(tr){setTrainer(tr);setUser(null);}else{setUser(u);setTrainer(null);}}});
+  // choose
+  return React.createElement(ChooseScreen,{onUser:()=>_setNavScr('login'),onTrainer:()=>_setNavScr('trainer_login')});
+}
+
+// ─── SPLASH ───────────────────────────────────────────────────────────────────
+function Splash(){
+  return React.createElement('div',{style:{height:'100vh',background:'#152535',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:20}},
+    React.createElement('img',{loading:'lazy',decoding:'async',src:LOGO_SRC,style:{width:180,animation:'fadeIn .8s ease'}}),
+    React.createElement('div',{className:'spin',style:{marginTop:10}})
+  );
+}
+
+// ─── CHOOSE ───────────────────────────────────────────────────────────────────
+function ChooseScreen({onUser,onTrainer}){
+  return React.createElement('div',{className:'scr',style:{background:'#0d1b2a',alignItems:'center',justifyContent:'center',padding:24}},
+    React.createElement('img',{loading:'lazy',decoding:'async',src:LOGO_SRC,style:{width:190,marginBottom:36,filter:'drop-shadow(0 0 20px #00bcd440)'}}),
+    React.createElement('div',{style:{width:'100%',maxWidth:360}},
+      React.createElement('div',{style:{fontSize:18,fontWeight:900,color:'#e2f7fb',textAlign:'center',marginBottom:24,fontFamily:"'Rajdhani',sans-serif",letterSpacing:'.05em'}},'¿Cómo deseas ingresar?'),
+      React.createElement('button',{className:'btn btn-primary',onClick:onUser,style:{marginBottom:12}},'Soy Usuario'),
+      React.createElement('button',{className:'btn btn-secondary',onClick:onTrainer},'Soy Entrenador')
+    )
+  );
+}
+
+// ─── TOAST helper ─────────────────────────────────────────────────────────────
+function Toast({msg,type='ok'}){
+  const bg = type==='err'?'#ef4444':type==='warn'?'#f59e0b':'#22c55e';
+  return msg?React.createElement('div',{style:{position:'fixed',bottom:20,left:'50%',transform:'translateX(-50%)',background:bg,color:'#fff',padding:'10px 20px',borderRadius:10,fontWeight:700,fontSize:13,zIndex:999,boxShadow:'0 4px 16px rgba(0,0,0,.2)',animation:'fadeIn .2s ease'}},msg):null;
+}
+function useToast(){
+  const [toast,setToast]=useState(null);
+  function show(msg,type='ok',ms=2500){
+    setToast({msg,type});
+    setTimeout(()=>setToast(null),ms);
+  }
+  return [toast,show];
+}
+
+// ─── LOGIN / REGISTER ─────────────────────────────────────────────────────────
+function LoginScreen({onBack, onLogin}){
+  const [mode,setMode]=useState('login'); // login | register | reset
+  const [nm,setNm]=useState('');
+  const [em,setEm]=useState('');
+  const [pw,setPw]=useState('');
+  const [tel,setTel]=useState('');
+  const [err,setErr]=useState('');
+  const [info,setInfo]=useState(''); // mensaje neutro de confirmación
+  const [loading,setLoading]=useState(false);
+
+  useEffect(()=>{
+    ensureFirebaseReady().catch(e=>console.warn('user login firebase preload:', e));
+  },[]);
+  const [toast,showToast]=useToast();
+
+  async function doLogin(){
+    if(!em||!pw){setErr('Completa todos los campos');return;}
+    setLoading(true);setErr('');
+    try{
+      const doc = await DB.loginUser(em.trim().toLowerCase(), pw);
+      localStorage.setItem('jf_current_session', em.trim().toLowerCase());
+      if(doc.role==='trainer'){
+        const theme = getTrainerTheme(doc.colorIdx||0);
+        onLogin({...doc,...theme}, null);
+      } else {
+        onLogin(null, doc);
+      }
+    }catch(e){
+      setLoading(false);
+      setErr(e.message||'Email o contraseña incorrectos');
+    }
+  }
+
+  async function doReset(){
+    if(!em){setErr('Ingresa tu correo electrónico');return;}
+    setLoading(true);setErr('');setInfo('');
+    const result = await DB.resetPassword(em.trim().toLowerCase());
+    setLoading(false);
+    // Mostrar siempre mensaje neutro — no revela si el email existe
+    setInfo(result.message);
+  }
+
+  async function doRegister(){
+    if(!nm||!em||!pw){setErr('Completa todos los campos');return;}
+    if(pw.length<6){setErr('Contraseña mínimo 6 caracteres');return;}
+    setLoading(true);setErr('');
+    try{
+      const doc = await DB.registerUser(em.trim().toLowerCase(), pw, nm.trim(), tel.trim());
+      localStorage.setItem('jf_current_session', em.trim().toLowerCase());
+      onLogin(null, doc);
+    }catch(e){
+      setLoading(false);
+      setErr(e.message||'Error al registrarse: intenta de nuevo');
+    }
+  }
+
+  return React.createElement('div',{className:'scr',style:{background:'#152535'}},
+    React.createElement('div',{className:'wfc-top'},React.createElement('div',{className:'wfc-top-txt'},'JuandaFit')),
+    React.createElement('div',{className:'scrollable',style:{padding:20}},
+      React.createElement('img',{loading:'lazy',decoding:'async',src:LOGO_SRC,style:{width:100,display:'block',margin:'0 auto 24px'}}),
+      // Tabs: solo login y register (reset tiene su propia vista)
+      mode!=='reset'&&React.createElement('div',{style:{display:'flex',gap:0,marginBottom:20,background:'#0d1b2a',borderRadius:10,padding:3}},
+        ['login','register'].map(m=>React.createElement('button',{key:m,onClick:()=>{setMode(m);setErr('');setInfo('');},
+          style:{flex:1,padding:'8px',borderRadius:8,border:'none',fontWeight:700,fontSize:13,cursor:'pointer',
+            background:mode===m?'#fff':'transparent',color:mode===m?'#00bcd4':'#64748b',transition:'.15s'}},
+          m==='login'?'Iniciar sesión':'Registrarse'))
+      ),
+      // Modo recuperación de contraseña
+      mode==='reset'&&React.createElement('div',null,
+        React.createElement('button',{onClick:()=>{setMode('login');setErr('');setInfo('');},
+          style:{background:'none',border:'none',color:'#7aadbe',fontSize:12,cursor:'pointer',marginBottom:16,padding:0}},
+          'Volver al inicio de sesión'
+        ),
+        React.createElement('div',{style:{fontSize:18,fontWeight:900,color:'#e2f7fb',marginBottom:6,fontFamily:"'Rajdhani',sans-serif"}},'Recuperar contraseña'),
+        React.createElement('div',{style:{fontSize:12,color:'#a8cdd8',marginBottom:20,lineHeight:1.5}},
+          'Ingresa tu correo y te enviaremos un enlace para restablecer tu contraseña.'
+        ),
+        React.createElement('div',{style:{marginBottom:16}},
+          React.createElement('label',{className:'label'},'CORREO ELECTRÓNICO'),
+          React.createElement('input',{className:'inp',type:'email',value:em,onChange:e=>setEm(e.target.value),
+            placeholder:'correo@ejemplo.com',onKeyDown:e=>{if(e.key==='Enter')doReset();}})
+        ),
+        err&&React.createElement('div',{className:'err',style:{marginBottom:12}},err),
+        // Mensaje neutro de confirmación (no revela si el email existe)
+        info&&React.createElement('div',{style:{background:'#0d2416',border:'1px solid #86efac',borderRadius:9,padding:'10px 14px',marginBottom:12,fontSize:12,color:'#166534',lineHeight:1.5}},
+          '✉️ ',info
+        ),
+        !info&&(loading?
+          React.createElement('div',{style:{textAlign:'center',padding:12}},React.createElement('div',{className:'spin'})):
+          React.createElement('button',{className:'btn btn-primary',onClick:doReset},'Enviar enlace de recuperación')
+        )
+      ),
+      mode==='register'&&React.createElement('div',null,
+        React.createElement('div',{style:{background:'#0d2416',border:'1px solid #86efac',borderRadius:9,padding:'8px 12px',marginBottom:14,fontSize:11,color:'#166534'}},
+          'Solo necesitas nombre, correo y contraseña. Tu entrenador completará los datos físicos.'
+        ),
+        React.createElement('div',{style:{marginBottom:12}},
+          React.createElement('label',{className:'label'},'NOMBRE COMPLETO'),
+          React.createElement('input',{className:'inp',value:nm,onChange:e=>setNm(e.target.value),placeholder:'Tu nombre completo'})
+        ),
+        React.createElement('div',{style:{marginBottom:12}},
+          React.createElement('label',{className:'label'},'TELÉFONO (opcional)'),
+          React.createElement('input',{className:'inp',type:'tel',value:tel,onChange:e=>setTel(e.target.value),placeholder:'+57 300 000 0000'})
+        )
+      ),
+      mode!=='reset'&&React.createElement('div',{style:{marginBottom:12}},
+        React.createElement('label',{className:'label'},'EMAIL'),
+        React.createElement('input',{className:'inp',type:'email',value:em,onChange:e=>setEm(e.target.value),placeholder:'correo@ejemplo.com'})
+      ),
+      mode!=='reset'&&React.createElement('div',{style:{marginBottom:mode==='login'?6:20}},
+        React.createElement('label',{className:'label'},'CONTRASEÑA'),
+        React.createElement('input',{className:'inp',type:'password',value:pw,onChange:e=>setPw(e.target.value),
+          placeholder:'••••••',onKeyDown:e=>{if(e.key==='Enter')(mode==='login'?doLogin:doRegister)();}})
+      ),
+      // Link "Olvidé mi contraseña" — solo en modo login
+      mode==='login'&&React.createElement('div',{style:{textAlign:'right',marginBottom:16}},
+        React.createElement('button',{
+          onClick:()=>{setMode('reset');setErr('');setInfo('');},
+          style:{background:'none',border:'none',color:'#00bcd4',fontSize:12,fontWeight:600,cursor:'pointer',padding:0}
+        },'¿Olvidaste tu contraseña?')
+      ),
+      mode!=='reset'&&err&&React.createElement('div',{className:'err',style:{marginBottom:12}},err),
+      mode!=='reset'&&(loading?React.createElement('div',{style:{textAlign:'center',padding:12}},React.createElement('div',{className:'spin'})):
+        React.createElement('button',{className:'btn btn-primary',onClick:mode==='login'?doLogin:doRegister},
+          mode==='login'?'Entrar':'Crear cuenta')),
+      React.createElement('button',{className:'btn btn-secondary',onClick:onBack,style:{marginTop:10}},'Volver')
+    ),
+    React.createElement(Toast,toast||{})
+  );
+}
+
+// ─── TRAINER LOGIN ─────────────────────────────────────────────────────────────
+function TrainerLoginScreen({onBack, onLogin}){
+  const [pin,setPin]=useState('');
+  const [err,setErr]=useState('');
+  const [loading,setLoading]=useState(false);
+
+  useEffect(()=>{
+    ensureFirebaseReady().catch(e=>console.warn('trainer login firebase preload:', e));
+  },[]);
+
+  async function doLogin(){
+    if(!pin||pin.length<3){setErr('Ingresa tu PIN');return;}
+    setLoading(true);setErr('');
+    try{
+      // 0. Asegurar que Firebase esté listo antes de usar db_fs
+      await ensureFirebaseReady();
+      // 1. Verificar PIN en Firestore (lectura pública)
+      const snap = await db_fs.collection('users').where('role','==','trainer').limit(1).get();
+      if(snap.empty) throw new Error('No hay entrenador registrado.');
+      const trainerDoc = snap.docs[0].data();
+      if(String(trainerDoc.pin) !== String(pin)) throw new Error('PIN incorrecto.');
+
+      // 2. Autenticar con Firebase Auth real (email+PIN como password)
+      // Esto permite escribir en Firestore con las reglas normales
+      const email = trainerDoc.email;
+      const password = 'juandafit_' + pin; // password derivada del PIN
+      try{
+        await auth.signInWithEmailAndPassword(email, password);
+      }catch(authErr){
+        if(authErr.code === 'auth/user-not-found' || authErr.code === 'auth/invalid-credential' || authErr.code === 'auth/wrong-password'){
+          // Primera vez: crear el usuario en Firebase Auth
+          try{
+            await auth.createUserWithEmailAndPassword(email, password);
+          }catch(createErr){
+            // Si ya existe pero con otra contraseña, actualizar
+            console.warn('Auth create error:', createErr.code);
+          }
+        }
+      }
+
+      localStorage.setItem('jf_current_session', email);
+      const theme = getTrainerTheme(0);
+      if(onLogin) onLogin({...trainerDoc,...theme}, null);
+    }catch(e){
+      setLoading(false);
+      setErr(e.message||'PIN incorrecto. Intenta de nuevo.');
+    }
+  }
+
+  return React.createElement('div',{className:'scr',style:{background:'#0d1b2a'}},
+    React.createElement('div',{className:'wfc-top'},React.createElement('div',{className:'wfc-top-txt'},'JuandaFit')),
+    React.createElement('div',{className:'scrollable',style:{padding:24,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',minHeight:'80vh'}},
+      React.createElement('img',{loading:'lazy',decoding:'async',src:LOGO_SRC,style:{width:110,display:'block',margin:'0 auto 24px',filter:'drop-shadow(0 0 20px #00bcd440)'}}),
+      React.createElement('div',{style:{fontSize:20,fontWeight:900,color:'#e2f7fb',textAlign:'center',marginBottom:6,fontFamily:"'Rajdhani',sans-serif",letterSpacing:'.05em'}},'Acceso Entrenador'),
+      React.createElement('div',{style:{fontSize:12,color:'#7aadbe',textAlign:'center',marginBottom:28}},'Ingresa tu PIN para continuar'),
+      React.createElement('div',{style:{width:'100%',maxWidth:280}},
+        React.createElement('input',{
+          className:'inp',
+          type:'password',
+          inputMode:'numeric',
+          value:pin,
+          onChange:e=>setPin(e.target.value),
+          onKeyDown:e=>{if(e.key==='Enter')doLogin();},
+          placeholder:'PIN',
+          style:{
+            textAlign:'center',
+            fontSize:28,
+            fontWeight:900,
+            letterSpacing:'0.3em',
+            fontFamily:"'Rajdhani',sans-serif",
+            marginBottom:16
+          }
+        }),
+        err&&React.createElement('div',{className:'err',style:{marginBottom:12}},err),
+        loading?
+          React.createElement('div',{style:{textAlign:'center',padding:12}},React.createElement('div',{className:'spin'})):
+          React.createElement('button',{className:'btn btn-primary',onClick:doLogin,style:{width:'100%',fontSize:15,padding:'14px'}},'Entrar'),
+        React.createElement('button',{className:'btn btn-secondary',onClick:onBack,style:{marginTop:10,width:'100%'}},'Volver')
+      )
+    )
+  );
+}
+
+
+
+function AccessBlockedScreen({user,onLogout,onProfile}){
+  return React.createElement('div',{className:'scr'},
+    React.createElement('div',{className:'wfc-top'},React.createElement('div',{className:'wfc-top-txt'},'JuandaFit')),
+    React.createElement('div',{className:'hdr'},
+      React.createElement('div',null,
+        React.createElement('div',{style:{fontWeight:800,fontSize:14,color:'#ef4444'}},'Acceso restringido'),
+        React.createElement('div',{style:{fontSize:11,color:'#a8cdd8'}},user.name||user.email||'Usuario')
+      ),
+      React.createElement('button',{onClick:onLogout,style:{background:'transparent',border:'1px solid #1e4a6a',borderRadius:8,padding:'6px 12px',fontSize:12,color:'#7aadbe',cursor:'pointer'}},'Salir')
+    ),
+    React.createElement('div',{className:'scrollable',style:{padding:18,background:'#0d1b2a',display:'flex',alignItems:'center',justifyContent:'center'}},
+      React.createElement('div',{className:'card',style:{maxWidth:420,width:'100%',textAlign:'center',border:'1.5px solid #ef444455',boxShadow:'0 0 24px #ef444415'}},
+        React.createElement('div',{style:{fontSize:46,marginBottom:10}},'🔒'),
+        React.createElement('div',{style:{fontSize:20,fontWeight:900,color:'#e2f7fb',marginBottom:8}},'Tu acceso está temporalmente restringido'),
+        React.createElement('div',{style:{fontSize:13,color:'#a8cdd8',lineHeight:1.6,marginBottom:14}},
+          user.accessReason || 'Comunícate con tu entrenador para reactivar tu acceso al plan de entrenamiento.'
+        ),
+        React.createElement('div',{style:{background:'#ef444415',border:'1px solid #ef444440',borderRadius:12,padding:'10px',fontSize:11,color:'#fca5a5',fontWeight:700,marginBottom:14}},
+          'Mientras el acceso esté bloqueado no podrás ver ni completar rutinas.'
+        ),
+        React.createElement('button',{className:'btn btn-secondary',onClick:onProfile,style:{marginBottom:10}},'Ver mi perfil'),
+        React.createElement('button',{className:'btn btn-primary',onClick:onLogout,style:{background:'#ef4444'}},'Salir')
+      )
+    )
+  );
+}
+
+// ─── HOME SCREEN ──────────────────────────────────────────────────────────────
+function HomeScreen({user,onNav,onLogout,updateUser}){
+  const [scr,setScr]=useState('home');
+  const [selDay,setSelDay]=useState(null);
+  const [selEx,setSelEx]=useState(null);
+  const [weekAtt,setWeekAtt]=useState({});
+  const [routines,setRoutines]=useState({});
+  const [ver,setVer]=useState(0);
+
+  const todayIdx = new Date().getDay(); // 0=dom,1=lun...
+  const todayKey = DAY_KEYS[todayIdx===0?6:todayIdx-1];
+
+  useEffect(()=>{
+    async function load(){
+      const[att,rtn]=await Promise.all([DB.getWeekAtt(user.uid),DB.getAllRoutines(user.uid)]);
+      setWeekAtt(att);setRoutines(rtn);
+    }
+    load();
+  },[user.email,ver]);
+
+  function refresh(){setVer(v=>v+1);}
+
+  if(scr==='profile') return React.createElement(ProfileScreen,{user,onBack:()=>setScr('home')});
+  if(isAccessBlocked(user)) return React.createElement(AccessBlockedScreen,{user,onLogout,onProfile:()=>setScr('profile')});
+  if(scr==='training'&&selDay) return React.createElement(TrainingScreen,{user,day:selDay,routines,weekAtt,onBack:()=>{setScr('home');refresh();},onSelectEx:ex=>{setSelEx(ex);setScr('exercise');}});
+  if(scr==='exercise'&&selEx&&selDay) return React.createElement(ExerciseScreen,{user,day:selDay,exercise:selEx,routine:routines[selDay]||[],onBack:()=>{setScr('training');refresh();}});
+
+  // Home main
+  const done = DAY_KEYS.filter(dk=>weekAtt[dk]&&weekAtt[dk].s==='done').length;
+  const missed = DAY_KEYS.filter(dk=>weekAtt[dk]&&weekAtt[dk].s==='missed').length;
+
+  return React.createElement('div',{className:'scr'},
+    React.createElement('div',{className:'wfc-top'},React.createElement('div',{className:'wfc-top-txt'},'JuandaFit')),
+    React.createElement('div',{className:'hdr'},
+      React.createElement('div',{style:{display:'flex',alignItems:'center',gap:10}},
+        React.createElement(AvatarCircle,{user,size:36,fontSize:15}),
+        React.createElement('div',null,
+          React.createElement('div',{style:{fontWeight:700,fontSize:15,color:'#e2f7fb'}},user.name),
+          React.createElement('div',{style:{fontSize:11,color:'#22c55e',fontWeight:600}},'● Conectado')
+        )
+      ),
+      React.createElement('div',{style:{display:'flex',gap:8}},
+        React.createElement('button',{onClick:()=>setScr('profile'),style:{background:'#00bcd4',color:'#fff',border:'none',borderRadius:8,padding:'6px 12px',fontSize:12,fontWeight:700,cursor:'pointer'}},'Perfil'),
+        React.createElement('button',{onClick:onLogout,style:{background:'transparent',border:'1px solid #1e4a6a',borderRadius:8,padding:'6px 12px',fontSize:12,color:'#7aadbe',cursor:'pointer'}},'Salir')
+      )
+    ),
+    React.createElement('div',{className:'scrollable',style:{padding:14,background:'#0d1b2a'}},
+      // Banner perfil pendiente
+      user.profileStatus==='pending'&&React.createElement('div',{style:{background:'#fefce8',border:'1.5px solid #fde047',borderRadius:10,padding:'10px 14px',marginBottom:12,fontSize:11,color:'#854d0e',display:'flex',gap:8,alignItems:'flex-start'}},
+        React.createElement('span',{style:{fontSize:18,lineHeight:1}},'⏳'),
+        React.createElement('div',null,
+          React.createElement('div',{style:{fontWeight:800,marginBottom:2}},'Perfil pendiente de configuración'),
+          React.createElement('div',null,'Tu entrenador completará tu información física y deportiva pronto.')
+        )
+      ),
+      // Week summary
+      React.createElement('div',{className:'card',style:{marginBottom:12}},
+        React.createElement('div',{style:{display:'flex',gap:4,marginBottom:10}},
+          DAY_KEYS.map((dk,i)=>{
+            const att=weekAtt[dk]; const s=att?att.s:null;
+            const hasRtn=(routines[dk]||[]).length>0;
+            const bg=s==='done'?'#16a34a':s==='repuesto'?'#6366f1':s==='missed'&&hasRtn?'#00bcd4':hasRtn?'#94a3b8':'#e2e8f0';
+            return React.createElement('div',{key:dk,style:{flex:1,textAlign:'center'}},
+              React.createElement('div',{style:{height:32,background:bg,borderRadius:6,display:'flex',alignItems:'center',justifyContent:'center',fontSize:10,color:'#fff',fontWeight:900,marginBottom:2}},
+                s==='done'?'✓':s==='missed'&&hasRtn?'✗':s==='repuesto'?'R':hasRtn?'·':'-'),
+              React.createElement('div',{style:{fontSize:7,color:'#7aadbe',fontWeight:700}},DAY_SHORT[dk])
+            );
+          })
+        ),
+        React.createElement('div',{style:{display:'flex',gap:8}},
+          React.createElement('div',{style:{flex:1,textAlign:'center',background:'#16a34a15',borderRadius:8,padding:'8px 4px'}},
+            React.createElement('div',{style:{fontSize:22,fontWeight:900,color:'#16a34a'}},done),
+            React.createElement('div',{style:{fontSize:9,color:'#a8cdd8'}},'Entrenados')
+          ),
+          React.createElement('div',{style:{flex:1,textAlign:'center',background:'#00bcd420',borderRadius:8,padding:'8px 4px'}},
+            React.createElement('div',{style:{fontSize:22,fontWeight:900,color:'#00bcd4'}},missed),
+            React.createElement('div',{style:{fontSize:9,color:'#a8cdd8'}},'Perdidos')
+          )
+        )
+      ),
+      // Day cards
+      React.createElement('div',{style:{fontSize:10,fontWeight:900,color:'#7aadbe',letterSpacing:'.08em',marginBottom:8}},'MI SEMANA'),
+      DAY_KEYS.map((dk,i)=>{
+        const att=weekAtt[dk]; const s=att?att.s:null;
+        const exs=routines[dk]||[];
+        const isToday=dk===todayKey;
+        return React.createElement('div',{key:dk,
+          onClick:()=>{setSelDay(dk);setScr('training');},
+          className:'card fade',
+          style:{cursor:'pointer',border:isToday?'2px solid #00bcd4':'1px solid #e2e8f0',background:isToday?'#fff8f5':'#fff',marginBottom:8}},
+          React.createElement('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center'}},
+            React.createElement('div',null,
+              React.createElement('div',{style:{fontWeight:800,color:'#e2f7fb',fontSize:14}},
+                (isToday?'HOY — ':'')+DAY_LABELS[dk]),
+              React.createElement('div',{style:{fontSize:11,color:'#7aadbe',marginTop:2}},
+                exs.length>0?(exs.length+' ejercicios'):'Sin rutina')
+            ),
+            React.createElement('div',{style:{display:'flex',alignItems:'center',gap:8}},
+              s==='done'&&React.createElement('span',{style:{color:'#16a34a',fontSize:12,fontWeight:700}},'Listo'),
+              s==='missed'&&exs.length>0&&React.createElement('span',{style:{color:'#00bcd4',fontSize:12,fontWeight:700}},'No completado'),
+              React.createElement('span',{style:{color:'#7aadbe',fontSize:18}},'>>')
+            )
+          )
+        );
+      })
+    )
+  );
+}
+
+// ─── TRAINING SCREEN ──────────────────────────────────────────────────────────
+function TrainingScreen({user,day,routines,weekAtt,onBack,onSelectEx}){
+  const exs = routines[day]||[];
+  const att = weekAtt[day];
+  const [helpSent,setHelpSent]=useState(false);
+  const [helping,setHelping]=useState(false);
+  const [logs,setLogs]=useState({});
+  const today=new Date().toISOString().slice(0,10);
+
+  useEffect(()=>{
+    async function loadLogs(){
+      const logMap={};
+      for(const ex of exs){
+        const l=await DB.getExerciseLog(user.uid,ex.id,today);
+        if(l)logMap[ex.id]=l;
+      }
+      setLogs(logMap);
+    }
+    if(exs.length)loadLogs();
+  },[day,exs.length]);
+
+  const doneCount=Object.values(logs).filter(l=>l&&l.allDone).length;
+  const pct=exs.length>0?Math.round(doneCount/exs.length*100):0;
+
+  async function markAtt(status){
+    await DB.setAtt(user.uid,day,status);
+    onBack();
+  }
+
+  async function sendHelp(){
+    setHelping(true);
+    try{
+      await DB.postHelp({userId:user.uid,userName:user.name,day:DAY_LABELS[day],
+        exercisesDone:doneCount,exercisesTotal:exs.length,
+        age:user.age,cond:user.cond});
+      setHelpSent(true);
+    }catch(e){}
+    setHelping(false);
+  }
+
+  return React.createElement('div',{className:'scr'},
+    React.createElement('div',{className:'wfc-top'},React.createElement('div',{className:'wfc-top-txt'},'JuandaFit')),
+    React.createElement('div',{className:'hdr'},
+      React.createElement('button',{className:'hdr-back',onClick:onBack},'Volver'),
+      React.createElement('div',{className:'hdr-title'},'ENTRENANDO · '+DAY_LABELS[day].toUpperCase()),
+      React.createElement('div',{style:{fontSize:12,fontWeight:700,color:'#00bcd4'}},pct+'%')
+    ),
+    React.createElement('div',{className:'scrollable',style:{padding:14,background:'#0d1b2a'}},
+
+      // ── Barra de progreso ──
+      React.createElement('div',{style:{marginBottom:16}},
+        React.createElement('div',{style:{display:'flex',justifyContent:'space-between',marginBottom:6}},
+          React.createElement('span',{style:{fontSize:12,color:'#a8cdd8',fontWeight:600}},'Progreso de hoy'),
+          React.createElement('span',{style:{fontWeight:700,color:'#00bcd4'}},doneCount+'/'+exs.length+' ejercicios')
+        ),
+        React.createElement('div',{style:{background:'#152535',borderRadius:99,height:10,overflow:'hidden',border:'1px solid #1e4a6a'}},
+          React.createElement('div',{style:{width:pct+'%',height:'100%',background:'linear-gradient(90deg,#00bcd4,#00e5ff)',borderRadius:99,transition:'.4s',boxShadow:pct>0?'0 0 10px #00bcd460':'none'}})
+        )
+      ),
+
+      // ── Grid de ejercicios (cajitas) ──
+      exs.length===0&&React.createElement('div',{style:{textAlign:'center',color:'#7aadbe',padding:30}},'Sin rutina asignada para este día.'),
+
+      exs.length>0&&React.createElement('div',{style:{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:16}},
+        exs.map((ex,i)=>{
+          const log=logs[ex.id];
+          const done=log&&log.allDone;
+          const c=exColor(ex.id);
+          return React.createElement('div',{
+            key:ex.id,
+            onClick:()=>onSelectEx(ex),
+            style:{
+              cursor:'pointer',
+              background:done?'#0d2416':'#152535',
+              border:'1.5px solid '+(done?'#16a34a':c+'55'),
+              borderRadius:16,
+              padding:'12px 10px',
+              display:'flex',flexDirection:'column',alignItems:'center',
+              gap:8,
+              position:'relative',
+              boxShadow:done?'0 0 12px #16a34a20':'0 2px 8px #00000040',
+              transition:'all .2s'
+            }
+          },
+            done&&React.createElement('div',{style:{
+              position:'absolute',top:8,right:8,
+              width:20,height:20,borderRadius:'50%',
+              background:'#16a34a',
+              display:'flex',alignItems:'center',justifyContent:'center',
+              fontSize:10,color:'#fff',fontWeight:900
+            }},'OK'),
+            React.createElement('div',{style:{
+              width:56,height:56,borderRadius:12,
+              background:'#0d1b2a',
+              border:'1.5px solid '+c+'44',
+              overflow:'hidden',
+              display:'flex',alignItems:'center',justifyContent:'center'
+            }},
+              getExerciseImage(ex)?
+                React.createElement('img',{loading:'lazy',decoding:'async',src:getExerciseImage(ex),style:{width:'100%',height:'100%',objectFit:'contain'}}):
+                React.createElement('img',{loading:'lazy',decoding:'async',src:IMG_PLACEHOLDER,style:{width:'100%',height:'100%',objectFit:'contain',opacity:0.3}})
+            ),
+            React.createElement('div',{style:{textAlign:'center'}},
+              React.createElement('div',{style:{fontWeight:700,color:done?'#4ade80':'#e2f7fb',fontSize:12,lineHeight:1.3,marginBottom:4}},ex.name),
+              React.createElement('div',{style:{fontSize:10,color:'#7aadbe'}},
+                (ex.sets||3)+'×'+(ex.reps||10)+' reps'
+              )
+            )
+          );
+        })
+      ),
+
+      // ── Botón de ayuda deshabilitado ──
+      null,
+
+      // ── Marcar asistencia ──
+      !att&&exs.length>0&&React.createElement('div',{style:{marginBottom:12}},
+        React.createElement('div',{style:{fontSize:10,fontWeight:700,color:'#7aadbe',letterSpacing:'.1em',marginBottom:8,textAlign:'center'}},'¿TERMINASTE?'),
+        React.createElement('div',{style:{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}},
+          React.createElement('button',{className:'btn',onClick:()=>markAtt('done'),style:{background:'linear-gradient(135deg,#16a34a,#15803d)',color:'#fff',fontSize:13,padding:'12px',borderRadius:12,border:'none'}},'Completado'),
+          React.createElement('button',{className:'btn',onClick:()=>markAtt('missed'),style:{background:'transparent',border:'1.5px solid #1e4a6a',color:'#7aadbe',fontSize:13,padding:'12px',borderRadius:12}},'No completado')
+        )
+      ),
+      att&&React.createElement('div',{style:{textAlign:'center',padding:'14px',fontSize:13,fontWeight:700,color:att.s==='done'?'#4ade80':'#5a8fa8',borderRadius:12,background:'#152535',border:'1px solid #1e4a6a'}},
+        att.s==='done'?'Entrenamiento completado':'No completado')
+    )
+  );
+}
+
+// ─── EXERCISE SCREEN ──────────────────────────────────────────────────────────
+function ExerciseScreen({user,day,exercise:ex,routine,onBack}){
+  const today=new Date().toISOString().slice(0,10);
+
+  const [log,setLog]=useState(null);
+  const [note,setNote]=useState('');
+  const [exInfo,setExInfo]=useState(null);
+  const [helpSent,setHelpSent]=useState(false);
+  const [helping,setHelping]=useState(false);
+  const [restTimer,setRestTimer]=useState(null);
+  const [localSets,setLocalSets]=useState(parseInt(ex.sets)||3);
+  const [localReps,setLocalReps]=useState(parseInt(ex.reps)||10);
+  const [localRest,setLocalRest]=useState(parseInt(ex.rest)||60);
+  const [unlockedVideos,setUnlockedVideos]=useState(null); // null = loading
+  const [showVideoLocked,setShowVideoLocked]=useState(false);
+
+  const restRef=React.useRef(null);
+
+  // Cargar log + nota + info del ejercicio + videos desbloqueados
+  useEffect(()=>{
+    async function load(){
+      const l=await DB.getExerciseLog(user.uid,ex.id,today);
+      if(l){setLog(l);}
+      else{setLog({sets:Array.from({length:localSets},(_,i)=>({reps:localReps,done:false,repsDone:localReps})),allDone:false});}
+      const n=await DB.getNote(user.uid,ex.id);
+      setNote(n||'');
+      const info=await DB.getExInfo(ex.id);
+      setExInfo(info||null);
+      try{
+        const uv=await DB.getUnlockedVideos(user.uid);
+        setUnlockedVideos(uv||[]);
+      }catch(e){
+        setUnlockedVideos([]);
+      }
+    }
+    load();
+    return()=>{if(restRef.current)clearInterval(restRef.current);};
+  },[ex.id]);
+
+  function startRest(sec){
+    if(restRef.current)clearInterval(restRef.current);
+    setRestTimer(sec);
+    restRef.current=setInterval(()=>{
+      setRestTimer(p=>{
+        if(p<=1){clearInterval(restRef.current);setRestTimer(null);return 0;}
+        return p-1;
+      });
+    },1000);
+  }
+
+  async function maybeAutoCompleteDay(currentExerciseId, currentLog){
+    if(!routine || routine.length===0 || !currentLog || !currentLog.allDone)return;
+    try{
+      let completed=0;
+      for(const rex of routine){
+        const l = rex.id===currentExerciseId ? currentLog : await DB.getExerciseLog(user.uid,rex.id,today);
+        if(l && l.allDone)completed++;
+      }
+      if(completed===routine.length){
+        await DB.setAtt(user.uid,day,'done');
+      }
+    }catch(e){console.warn('No se pudo autocompletar el día:',e);}
+  }
+
+  async function toggleSet(i){
+    if(!log)return;
+    const wasDown=!log.sets[i].done;
+    const newSets=log.sets.map((s,idx)=>idx===i?{...s,done:!s.done}:s);
+    const allDone=newSets.every(s=>s.done);
+    const nl={...log,sets:newSets,allDone};
+    setLog(nl);
+    await DB.saveExerciseLog(user.uid,ex.id,today,nl);
+    if(allDone)await maybeAutoCompleteDay(ex.id,nl);
+    if(wasDown)startRest(localRest);
+  }
+
+  async function updateRepsDone(i,val){
+    if(!log)return;
+    const newSets=log.sets.map((s,idx)=>idx===i?{...s,repsDone:parseInt(val)||0}:s);
+    const nl={...log,sets:newSets,allDone:newSets.every(s=>s.done)};
+    setLog(nl);
+    await DB.saveExerciseLog(user.uid,ex.id,today,nl);
+  }
+
+  async function changeSets(delta){
+    const ns=Math.max(1,localSets+delta);
+    setLocalSets(ns);
+    const newSets=Array.from({length:ns},(_,i)=>(log && log.sets ? log.sets[i] : null)||{reps:localReps,done:false,repsDone:localReps});
+    const nl={...(log||{}),sets:newSets,allDone:newSets.every(s=>s.done)};
+    setLog(nl);
+    await DB.saveExerciseLog(user.uid,ex.id,today,nl);
+  }
+
+  async function sendHelp(){
+    setHelping(true);
+    try{
+      await DB.postHelp({userId:user.uid,userName:user.name,day:DAY_LABELS[day],
+        exercise:ex.name,exerciseId:ex.id,
+        exercisesTotal:routine.length,
+        age:user.age,cond:user.cond});
+      setHelpSent(true);
+    }catch(e){}
+    setHelping(false);
+  }
+
+  function fmtTime(s){return String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0');}
+  const c=exColor(ex.id);
+
+  return React.createElement('div',{className:'scr'},
+    React.createElement('div',{className:'wfc-top'},React.createElement('div',{className:'wfc-top-txt'},'JuandaFit')),
+    React.createElement('div',{className:'hdr'},
+      React.createElement('button',{className:'hdr-back',onClick:onBack},'Volver'),
+      React.createElement('div',{className:'hdr-title'},ex.id),
+      React.createElement('div',{style:{fontSize:10,fontWeight:700,color:c}},ex.zone||'')
+    ),
+    React.createElement('div',{className:'scrollable',style:{padding:14,background:'#0d1b2a'}},
+
+      // Cabecera del ejercicio
+      React.createElement('div',{style:{
+        display:'flex',gap:14,alignItems:'center',
+        background:'#152535',borderRadius:18,padding:14,
+        border:'1.5px solid '+c+'44',marginBottom:12,
+        borderLeft:'4px solid '+c
+      }},
+        React.createElement('div',{style:{width:72,height:72,borderRadius:14,overflow:'hidden',background:'#0d1b2a',flexShrink:0,display:'flex',alignItems:'center',justifyContent:'center',border:'1px solid '+c+'33'}},
+          getExerciseImage(ex,exInfo)?
+            React.createElement('img',{loading:'lazy',decoding:'async',src:getExerciseImage(ex,exInfo),style:{width:'100%',height:'100%',objectFit:'contain'}}):
+            React.createElement('img',{loading:'lazy',decoding:'async',src:IMG_PLACEHOLDER,style:{width:'100%',height:'100%',objectFit:'contain',opacity:0.4}})
+        ),
+        React.createElement('div',{style:{flex:1}},
+          React.createElement('div',{style:{fontWeight:900,fontSize:17,color:'#e2f7fb',fontFamily:"'Rajdhani',sans-serif",lineHeight:1.2}},ex.name),
+          React.createElement('div',{style:{fontSize:12,color:'#7aadbe',marginTop:4}},localSets+' series × '+localReps+' reps · '+localRest+'s desc')
+        )
+      ),
+
+      // Nota del entrenador
+      note&&React.createElement('div',{style:{
+        background:'linear-gradient(135deg,#1a1230,#0f1528)',
+        border:'1.5px solid #7c3aed44',borderRadius:14,
+        padding:'12px 14px',marginBottom:12,
+        display:'flex',gap:10,alignItems:'flex-start'
+      }},
+        React.createElement('div',{style:{fontSize:20,flexShrink:0,display:"none"}},''),
+        React.createElement('div',null,
+          React.createElement('div',{style:{fontSize:10,fontWeight:900,color:'#a78bfa',letterSpacing:'.08em',marginBottom:4}},'NOTA DEL ENTRENADOR'),
+          React.createElement('div',{style:{fontSize:13,color:'#e2f7fb',lineHeight:1.5}},note)
+        )
+      ),
+
+      // Descripción del ejercicio (trainer)
+      exInfo&&exInfo.description&&React.createElement('div',{style:{
+        background:'#0d2416',border:'1.5px solid #16a34a44',
+        borderRadius:14,padding:'12px 14px',marginBottom:12,
+        display:'flex',gap:10,alignItems:'flex-start'
+      }},
+        React.createElement('div',{style:{fontSize:20,flexShrink:0,display:"none"}},''),
+        React.createElement('div',null,
+          React.createElement('div',{style:{fontSize:10,fontWeight:900,color:'#4ade80',letterSpacing:'.08em',marginBottom:4}},'DESCRIPCIÓN'),
+          React.createElement('div',{style:{fontSize:13,color:'#e2f7fb',lineHeight:1.6}},exInfo.description)
+        )
+      ),
+
+      // Modal video bloqueado
+      showVideoLocked&&React.createElement('div',{style:{position:'fixed',inset:0,background:'rgba(0,0,0,0.82)',zIndex:9999,display:'flex',alignItems:'center',justifyContent:'center',padding:20},onClick:()=>setShowVideoLocked(false)},
+        React.createElement('div',{style:{background:'#0d1b2a',border:'2px solid #ef444460',borderRadius:20,padding:28,maxWidth:340,width:'100%',textAlign:'center'},onClick:e=>e.stopPropagation()},
+          React.createElement('div',{style:{fontSize:44,marginBottom:12}},'🔒'),
+          React.createElement('div',{style:{fontWeight:900,fontSize:17,color:'#ef4444',marginBottom:10,fontFamily:"'Rajdhani',sans-serif",letterSpacing:'.05em'}},'VIDEO BLOQUEADO'),
+          React.createElement('div',{style:{fontSize:13,color:'#e2f7fb',lineHeight:1.6,marginBottom:16}},
+            'Este contenido aún no está habilitado en tu plan. Para desbloquearlo, comunícate con tu entrenador y realiza el pago correspondiente por fuera de la app (transferencia, Nequi, Daviplata, efectivo u otro medio).'
+          ),
+          React.createElement('div',{style:{background:'#152535',borderRadius:12,padding:'10px 14px',marginBottom:16,fontSize:12,color:'#7aadbe',display:'flex',gap:8,alignItems:'center',textAlign:'left'}},
+            React.createElement('span',{style:{fontSize:18}},'💬'),
+            'Una vez confirmes el pago, tu entrenador activará el acceso desde tu ficha.'
+          ),
+          React.createElement('button',{onClick:()=>setShowVideoLocked(false),style:{background:'#00bcd4',border:'none',borderRadius:12,padding:'12px 28px',color:'#0d1b2a',fontWeight:900,fontSize:14,cursor:'pointer',width:'100%'}},'Entendido')
+        )
+      ),
+
+      // Videos/tutoriales (con control de acceso)
+      (()=>{
+        let urls=[];
+        if(exInfo!==null){
+          if(Array.isArray(exInfo.links)){
+            urls=exInfo.links.filter(l=>l.url&&l.url.trim());
+          } else {
+            const defaultLabels=['Ver tutorial','Tutorial alternativo','Tutorial extra'];
+            ['video','video2','video3'].forEach((k,i)=>{
+              if(exInfo[k])urls.push({url:exInfo[k],label:defaultLabels[i],key:ex.id+'_'+k});
+            });
+            if(exInfo.link)urls.push({url:exInfo.link,label:exInfo.linkLabel||'Enlace del entrenador',key:ex.id+'_link'});
+          }
+        } else {
+          const defaultLabels=['Ver tutorial','Tutorial alternativo','Tutorial extra'];
+          [ex.video,ex.video2,ex.video3].forEach((u,i)=>{if(u)urls.push({url:u,label:defaultLabels[i],key:ex.id+'_video'+(i===0?'':i+1)});});
+        }
+        if(urls.length===0)return null;
+        // Asignar key a cada url si no tiene
+        urls=urls.map((lk,i)=>({...lk,key:lk.key||(ex.id+'_v'+i)}));
+        const uvLoading=unlockedVideos===null;
+        return React.createElement('div',{style:{marginBottom:12}},
+          urls.map((lk,i)=>{
+            const href=lk.url.includes('/embed/')?lk.url.replace('/embed/','/watch?v='):lk.url;
+            const isYT=href.includes('youtube')||href.includes('youtu.be');
+            const isDrive=href.includes('drive.google');
+            const isUnlocked=!uvLoading&&Array.isArray(unlockedVideos)&&unlockedVideos.includes(lk.key);
+            const color=isUnlocked?(isDrive?'#fbbf24':isYT?'#f87171':'#00bcd4'):'#64748b';
+            const bg=isUnlocked?(isDrive?'#2d200a':isYT?'#2d0d0d':'#0d2030'):'#121d28';
+            const border=isUnlocked?(isDrive?'#fbbf2440':isYT?'#f8717140':'#00bcd430'):'#64748b30';
+            if(isUnlocked){
+              return React.createElement('a',{key:i,
+                href,target:'_blank',rel:'noopener noreferrer',
+                style:{display:'flex',alignItems:'center',gap:10,padding:'12px 14px',
+                  background:bg,borderRadius:12,color,fontWeight:700,fontSize:13,
+                  textDecoration:'none',marginBottom:i<urls.length-1?6:0,
+                  border:'1.5px solid '+border}
+              },
+                React.createElement('span',{style:{fontSize:18}},isYT?'▶':isDrive?'📁':'🔗'),
+                lk.label||(isYT?'Ver tutorial':'Ver enlace')
+              );
+            }
+            return React.createElement('button',{key:i,
+              onClick:()=>setShowVideoLocked(true),
+              style:{display:'flex',alignItems:'center',gap:10,padding:'12px 14px',
+                background:bg,borderRadius:12,color,fontWeight:700,fontSize:13,
+                width:'100%',textAlign:'left',cursor:'pointer',
+                marginBottom:i<urls.length-1?6:0,
+                border:'1.5px solid '+border,
+                opacity:uvLoading?0.5:1}
+            },
+              React.createElement('span',{style:{fontSize:18}},uvLoading?'⏳':'🔒'),
+              React.createElement('span',{style:{flex:1}},lk.label||(isYT?'Ver tutorial':'Ver enlace')),
+              !uvLoading&&React.createElement('span',{style:{fontSize:10,background:'#ef444420',color:'#ef4444',borderRadius:6,padding:'2px 7px',fontWeight:700,letterSpacing:'.05em'}},'BLOQUEADO')
+            );
+          })
+        );
+      })(),
+
+      // Tip
+      React.createElement('div',{style:{
+        background:'#0d1b2a',border:'1px solid #1e4a6a',
+        borderRadius:12,padding:'10px 14px',marginBottom:12,
+        fontSize:12,color:'#7aadbe',display:'flex',gap:8,alignItems:'center'
+      }},
+        React.createElement('span',{style:{fontSize:16}},''),
+        'Ajusta series, reps y descanso con + −. Toca Hecho al terminar cada serie.'
+      ),
+
+      // Parámetros +/-
+      React.createElement('div',{style:{marginBottom:12}},
+        React.createElement('div',{style:{fontSize:10,fontWeight:900,color:'#7aadbe',letterSpacing:'.1em',marginBottom:8}},'PARÁMETROS'),
+        React.createElement('div',{style:{display:'flex',gap:8}},
+          [['SERIES',localSets,delta=>changeSets(delta)],['REPS',localReps,delta=>setLocalReps(p=>Math.max(1,p+delta))],['DESCANSO',localRest+'s',delta=>setLocalRest(p=>Math.max(5,p+delta*5))]].map(([lbl,val,fn])=>
+            React.createElement('div',{key:lbl,style:{flex:1,background:'#152535',borderRadius:14,padding:'12px 6px',textAlign:'center',border:'1px solid #1e4a6a'}},
+              React.createElement('div',{style:{fontSize:9,fontWeight:900,color:'#7aadbe',marginBottom:8}},lbl),
+              React.createElement('div',{style:{display:'flex',alignItems:'center',justifyContent:'center',gap:6}},
+                React.createElement('button',{onClick:()=>fn(-1),style:{width:26,height:26,borderRadius:8,border:'none',background:'#0d1b2a',fontWeight:900,fontSize:16,cursor:'pointer',color:'#00bcd4'}},'-'),
+                React.createElement('span',{style:{fontWeight:900,fontSize:16,color:'#00bcd4',minWidth:30,textAlign:'center'}},val),
+                React.createElement('button',{onClick:()=>fn(1),style:{width:26,height:26,borderRadius:8,border:'none',background:'#0d1b2a',fontWeight:900,fontSize:16,cursor:'pointer',color:'#00bcd4'}},'+')
+              )
+            )
+          )
+        )
+      ),
+
+      // Timer de descanso
+      restTimer!==null&&React.createElement('div',{style:{
+        background:'linear-gradient(135deg,#0d1b2a,#152535)',
+        borderRadius:16,padding:'20px',textAlign:'center',marginBottom:12,
+        border:'2px solid '+(restTimer<=5?'#ef4444':'#00bcd4')+'60'
+      }},
+        React.createElement('div',{style:{fontSize:11,color:'#7aadbe',fontWeight:700,marginBottom:6,letterSpacing:'.1em'}},'⏱ DESCANSO'),
+        React.createElement('div',{style:{fontSize:52,fontWeight:900,color:restTimer<=5?'#ef4444':'#00bcd4',fontFamily:"'Rajdhani',sans-serif",lineHeight:1}},fmtTime(restTimer)),
+        React.createElement('button',{onClick:()=>{clearInterval(restRef.current);setRestTimer(null);},
+          style:{marginTop:10,padding:'6px 18px',borderRadius:10,border:'none',background:'#1e4a6a',color:'#a8cdd8',fontSize:12,cursor:'pointer'}},'Saltar')
+      ),
+
+      // Series
+      React.createElement('div',{style:{marginBottom:12}},
+        React.createElement('div',{style:{fontSize:10,fontWeight:900,color:'#7aadbe',letterSpacing:'.1em',marginBottom:8}},'REGISTRO DE SERIES'),
+        log&&log.sets.map((s,i)=>
+          React.createElement('div',{key:i,style:{
+            display:'flex',alignItems:'center',gap:8,
+            padding:'10px 12px',borderRadius:12,
+            background:s.done?'#0d2416':'#152535',
+            border:'1.5px solid '+(s.done?'#16a34a':'#1e4a6a'),
+            marginBottom:8
+          }},
+            React.createElement('div',{style:{
+              width:32,height:32,borderRadius:10,
+              background:s.done?'#16a34a':'#0d1b2a',
+              display:'flex',alignItems:'center',justifyContent:'center',
+              fontWeight:900,fontSize:11,
+              color:s.done?'#fff':'#5a8fa8',flexShrink:0,
+              border:'1.5px solid '+(s.done?'#16a34a':'#1e4a6a')
+            }},'S'+(i+1)),
+            React.createElement('div',{style:{flex:1,fontSize:12,color:'#a8cdd8'}},'Meta: '+localReps+' reps'),
+            React.createElement('input',{type:'number',value:s.repsDone!=null?s.repsDone:localReps,onChange:e=>updateRepsDone(i,e.target.value),
+              style:{width:44,padding:'4px 6px',borderRadius:8,border:'1.5px solid #00bcd430',
+                fontSize:13,fontWeight:700,textAlign:'center',color:'#e2f7fb',background:'#0d1b2a'}}),
+            React.createElement('button',{onClick:()=>toggleSet(i),
+              style:{padding:'8px 12px',borderRadius:10,border:'none',
+                background:s.done?'#16a34a':'linear-gradient(135deg,#00bcd4,#0097a7)',
+                color:'#fff',fontWeight:700,fontSize:11,cursor:'pointer'}},
+              s.done?'Listo':'Hecho')
+          )
+        )
+      ),
+
+      // Botón de ayuda deshabilitado
+      null
+    )
+  );
+}
+
+// ─── PROFILE SCREEN ───────────────────────────────────────────────────────────
+// Helper: render an avatar circle (photo or initial)
+function AvatarCircle({user,size=72,fontSize=28}){
+  // Soporta URLs de Firebase Storage (https://...) y base64 (data:...)
+  const hasPhoto=user.avatar&&(user.avatar.startsWith('data:')||user.avatar.startsWith('http'));
+  return React.createElement('div',{style:{width:size,height:size,borderRadius:'50%',background:hasPhoto?'transparent':'#00bcd4',display:'inline-flex',alignItems:'center',justifyContent:'center',fontSize,color:'#fff',fontWeight:900,overflow:'hidden',flexShrink:0,border:'2px solid #00bcd433'}},
+    hasPhoto?React.createElement('img',{loading:'lazy',decoding:'async',src:user.avatar,style:{width:'100%',height:'100%',objectFit:'cover'},onError:e=>{e.target.style.display='none';}}):(user.name&&user.name[0]||'U')
+  );
+}
+
+
+
+function BodyCompositionChart({user,compact=false}){
+  user=user||{};
+  function num(v){
+    if(v===null||v===undefined||v==='')return null;
+    const n=parseFloat((''+v).replace(',','.').replace('%',''));
+    return isNaN(n)?null:n;
+  }
+  function nice(n){
+    if(n===null&&n!==0)return '';
+    return (Math.round(n*10)/10).toString().replace('.',',');
+  }
+  function clamp(n,min,max){return Math.max(min,Math.min(max,n));}
+
+  const grasaCorporal=num(user.grasaCorporal!==undefined&&user.grasaCorporal!==''?user.grasaCorporal:user.porcentajeGrasa);
+  const masaMuscular=num(user.masaMuscular!==undefined&&user.masaMuscular!==''?user.masaMuscular:user.porcentajeMasa);
+  const imc=num(user.imc);
+  const grasaVisceral=num(user.grasaVisceral);
+
+  const hasPie=(grasaCorporal!==null)||(masaMuscular!==null);
+  const hasIndicators=(imc!==null)||(grasaVisceral!==null);
+  if(!hasPie&&!hasIndicators)return null;
+
+  let fat=grasaCorporal===null?0:clamp(grasaCorporal,0,100);
+  let muscle=masaMuscular===null?0:clamp(masaMuscular,0,100);
+  let rest=Math.max(0,100-fat-muscle);
+
+  // Si los porcentajes suman más de 100, se normalizan solo para el dibujo.
+  // Los valores reales se mantienen en la leyenda.
+  if(fat+muscle>100){
+    const scale=100/(fat+muscle);
+    fat=fat*scale;
+    muscle=muscle*scale;
+    rest=0;
+  }
+
+  const pieItems=[
+    {key:'grasaCorporal',label:'Grasa corporal',value:grasaCorporal,draw:fat,unit:'%',color:'#ff4d6d'},
+    {key:'masaMuscular',label:'Masa muscular',value:masaMuscular,draw:muscle,unit:'%',color:'#00e5ff'},
+    {key:'otros',label:'Otros componentes',value:Math.round(rest*10)/10,draw:rest,unit:'%',color:'#7c3aed'}
+  ].filter(x=>x.key==='otros'||x.value!==null);
+
+  let start=0;
+  const segments=pieItems.map(x=>{
+    const seg={...x,start,end:start+(x.draw||0)};
+    start+=(x.draw||0);
+    return seg;
+  });
+  const gradient=hasPie
+    ? 'conic-gradient('+segments.map(s=>`${s.color} ${s.start}% ${s.end}%`).join(', ')+')'
+    : 'conic-gradient(#1e3347 0 100%)';
+
+  function LegendItem({item}){
+    return React.createElement('div',{style:{
+      display:'grid',
+      gridTemplateColumns:'12px 1fr auto',
+      alignItems:'center',
+      gap:8,
+      background:'#0d2030',
+      border:'1px solid '+item.color+'55',
+      borderRadius:10,
+      padding:'8px 10px'
+    }},
+      React.createElement('span',{style:{width:12,height:12,borderRadius:'50%',background:item.color,boxShadow:'0 0 12px '+item.color}}),
+      React.createElement('div',null,
+        React.createElement('div',{style:{fontSize:11,color:'#e2f7fb',fontWeight:900,lineHeight:1.05}},item.label),
+        React.createElement('div',{style:{fontSize:9,color:'#7aadbe',fontWeight:700,marginTop:2}},
+          item.key==='otros'?'Porción restante del 100%':'Porcentaje ingresado'
+        )
+      ),
+      React.createElement('div',{style:{fontSize:14,color:'#ffffff',fontWeight:900}},
+        (item.value===null?'—':nice(item.value))+item.unit
+      )
+    );
+  }
+
+  function Indicator({label,value,color,sub}){
+    if(value===null&&value!==0)return null;
+    return React.createElement('div',{style:{
+      background:'#0d2030',
+      border:'1px solid '+color+'66',
+      borderRadius:12,
+      padding:'10px 12px',
+      display:'grid',
+      gridTemplateColumns:'12px 1fr auto',
+      alignItems:'center',
+      gap:8
+    }},
+      React.createElement('span',{style:{width:12,height:12,borderRadius:'50%',background:color,boxShadow:'0 0 12px '+color}}),
+      React.createElement('div',null,
+        React.createElement('div',{style:{fontSize:11,color:'#e2f7fb',fontWeight:900}},label),
+        React.createElement('div',{style:{fontSize:9,color:'#7aadbe',fontWeight:700,marginTop:2}},sub)
+      ),
+      React.createElement('div',{style:{fontSize:16,color:'#ffffff',fontWeight:900}},nice(value))
+    );
+  }
+
+  return React.createElement('div',{style:{
+      marginTop:14,
+      padding:'14px',
+      border:'1px solid #00bcd430',
+      borderRadius:16,
+      background:'#102638'
+    }},
+    React.createElement('div',{style:{fontSize:10,fontWeight:900,color:'#00e5ff',letterSpacing:'.12em',marginBottom:12}},'COMPOSICIÓN CORPORAL'),
+    hasPie&&React.createElement('div',{style:{display:'flex',gap:16,alignItems:'center',justifyContent:'flex-start',flexWrap:'wrap'}},
+      React.createElement('div',{style:{
+          position:'relative',
+          width:compact?132:154,
+          height:compact?132:154,
+          borderRadius:'50%',
+          background:gradient,
+          boxShadow:'0 0 28px #00bcd433',
+          flex:'0 0 auto'
+        }},
+        React.createElement('div',{style:{
+            position:'absolute',
+            inset:compact?23:27,
+            borderRadius:'50%',
+            background:'#152535',
+            display:'flex',
+            alignItems:'center',
+            justifyContent:'center',
+            flexDirection:'column',
+            border:'1px solid #00bcd440',
+            textAlign:'center'
+          }},
+          React.createElement('div',{style:{fontSize:compact?20:24,fontWeight:900,color:'#ffffff',lineHeight:1}},(grasaCorporal!==null?nice(grasaCorporal):'—')+'%'),
+          React.createElement('div',{style:{fontSize:9,color:'#7aadbe',fontWeight:800,lineHeight:1.1}},'grasa')
+        )
+      ),
+      React.createElement('div',{style:{
+          display:'grid',
+          gridTemplateColumns:compact?'1fr':'repeat(auto-fit,minmax(180px,1fr))',
+          gap:8,
+          flex:'1 1 260px',
+          minWidth:220
+        }},
+        pieItems.map(item=>React.createElement(LegendItem,{key:item.key,item}))
+      )
+    ),
+    hasIndicators&&React.createElement('div',{style:{
+        display:'grid',
+        gridTemplateColumns:'repeat(auto-fit,minmax(180px,1fr))',
+        gap:8,
+        marginTop:hasPie?12:0
+      }},
+      React.createElement(Indicator,{label:'IMC',value:imc,color:'#22c55e',sub:'Indicador calculado con peso y estatura'}),
+      React.createElement(Indicator,{label:'Grasa visceral',value:grasaVisceral,color:'#f59e0b',sub:'Indicador separado, no porcentaje de la torta'})
+    ),
+    React.createElement('div',{style:{fontSize:9,color:'#7aadbe',marginTop:10,lineHeight:1.35}},
+      'La torta usa solo porcentajes comparables: grasa corporal, masa muscular y otros componentes. IMC y grasa visceral se muestran aparte porque son indicadores, no partes del 100%.'
+    )
+  );
+}
+
+
+// READ-ONLY profile for regular users
+function ProfileScreen({user,onBack}){
+  const objs=Array.isArray(user.objetivo)?user.objetivo:(user.objetivo?[user.objetivo]:[]);
+
+  function Row({label,value}){
+    if(!value&&value!==0)return null;
+    return React.createElement('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'flex-start',padding:'9px 0',borderBottom:'1px solid #f1f5f9'}},
+      React.createElement('span',{style:{fontSize:11,color:'#7aadbe',fontWeight:600,minWidth:100}},label),
+      React.createElement('span',{style:{fontSize:12,color:'#e2f7fb',fontWeight:700,textAlign:'right',flex:1,marginLeft:8}},value)
+    );
+  }
+
+  return React.createElement('div',{className:'scr'},
+    React.createElement('div',{className:'wfc-top'},React.createElement('div',{className:'wfc-top-txt'},'JuandaFit')),
+    React.createElement('div',{className:'hdr'},
+      React.createElement('button',{className:'hdr-back',onClick:onBack},'Volver'),
+      React.createElement('div',{className:'hdr-title'},'MI PERFIL')
+    ),
+    React.createElement('div',{className:'scrollable',style:{padding:14,background:'#0d1b2a'}},
+      // Avatar + name
+      React.createElement('div',{style:{textAlign:'center',marginBottom:16}},
+        React.createElement(AvatarCircle,{user,size:80,fontSize:32}),
+        React.createElement('div',{style:{fontWeight:800,fontSize:17,color:'#e2f7fb',marginTop:8}},user.name),
+        React.createElement('div',{style:{fontSize:12,color:'#7aadbe'}},user.email)
+      ),
+      // Notice: pending o configurado
+      user.profileStatus==='pending'?
+        React.createElement('div',{style:{background:'#fefce8',border:'1.5px solid #fde047',borderRadius:10,padding:'10px 14px',marginBottom:14,fontSize:11,color:'#854d0e',textAlign:'center'}},
+          React.createElement('div',{style:{fontWeight:800,fontSize:13,marginBottom:4}},'⏳ Perfil pendiente de configuración'),
+          'Tu entrenador completará tus datos físicos y deportivos en tu próxima sesión.'
+        ):
+        React.createElement('div',{style:{background:'#0d2030',border:'1px solid #bae6fd',borderRadius:10,padding:'9px 14px',marginBottom:14,fontSize:11,color:'#0369a1',textAlign:'center'}},
+          'Tu perfil es gestionado por tu entrenador. Contacta con él para actualizar tus datos.'
+        ),
+      // Data card
+      React.createElement('div',{className:'card'},
+        React.createElement('div',{style:{fontSize:10,fontWeight:900,color:'#7aadbe',letterSpacing:'.08em',marginBottom:6}},'INFORMACIÓN PERSONAL'),
+        React.createElement(Row,{label:'Edad',value:user.age?(user.age+' años'):null}),
+        React.createElement(Row,{label:'Sexo',value:user.sex}),
+        React.createElement(Row,{label:'Peso',value:user.peso?(user.peso+' kg'):null}),
+        React.createElement(Row,{label:'Estatura',value:user.estatura?(user.estatura+' cm'):null}),
+        React.createElement(Row,{label:'IMC',value:(user.imc||user.imc===0)?user.imc:null}),
+        React.createElement(Row,{label:'Grasa visceral',value:(user.grasaVisceral||user.grasaVisceral===0)?user.grasaVisceral:null}),
+        React.createElement(Row,{label:'Grasa corporal',value:(user.grasaCorporal||user.grasaCorporal===0)?(user.grasaCorporal+'%'):((user.porcentajeGrasa||user.porcentajeGrasa===0)?(user.porcentajeGrasa+'%'):null)}),
+        React.createElement(Row,{label:'Masa muscular',value:(user.masaMuscular||user.masaMuscular===0)?(user.masaMuscular+'%'):((user.porcentajeMasa||user.porcentajeMasa===0)?(user.porcentajeMasa+'%'):null)}),
+        React.createElement(BodyCompositionChart,{user}),
+        React.createElement(Row,{label:'Condición',value:user.cond&&user.cond!=='No aplica'?user.cond:null}),
+        React.createElement(Row,{label:'Frecuencia',value:user.frecuencia}),
+        React.createElement(Row,{label:'Inicio rutina',value:user.fechaInicio}),
+        React.createElement(Row,{label:'Cambio rutina',value:user.fechaCambio}),
+        React.createElement(Row,{label:'Estado de acceso',value:isAccessBlocked(user)?'Restringido':'Activo'})
+      ),
+      // Objectives (multi)
+      objs.length>0&&React.createElement('div',{className:'card',style:{marginTop:10}},
+        React.createElement('div',{style:{fontSize:10,fontWeight:900,color:'#7aadbe',letterSpacing:'.08em',marginBottom:8}},'MIS OBJETIVOS'),
+        React.createElement('div',{style:{display:'flex',gap:6,flexWrap:'wrap'}},
+          objs.map((o,i)=>React.createElement('span',{key:i,style:{background:'#fff8f5',border:'1.5px solid #00bcd4',borderRadius:8,padding:'5px 11px',color:'#00bcd4',fontWeight:700,fontSize:12}},o))
+        )
+      )
+    )
+  );
+}
+
+
+// ─── TRAINER PANEL ────────────────────────────────────────────────────────────
+function UserCard({u, onSelect, onDelete, deleting}){
+  return React.createElement('div',{
+    style:{background:'#152535',border:'1px solid #00bcd425',borderRadius:14,
+      padding:'12px 14px',marginBottom:8,display:'flex',alignItems:'center',gap:10,
+      cursor:'pointer'}},
+    React.createElement('div',{onClick:()=>onSelect(u),
+      style:{display:'flex',alignItems:'center',gap:12,flex:1}},
+      React.createElement(AvatarCircle,{user:u,size:40}),
+      React.createElement('div',{style:{flex:1}},
+        React.createElement('div',{style:{fontWeight:700,color:'#e2f7fb',fontSize:14}},u.name||u.email),
+        React.createElement('div',{style:{fontSize:11,color:'#7aadbe',marginTop:2}},u.email),
+        React.createElement('div',{style:{marginTop:5}},
+          React.createElement('span',{style:accessBadgeStyle(u)},accessLabel(u))
+        )
+      ),
+      React.createElement('span',{style:{color:'#00bcd4',fontSize:18}},'›')
+    ),
+    React.createElement('button',{
+      onClick:e=>{e.stopPropagation();onDelete(u);},
+      disabled:deleting,
+      style:{background:'transparent',border:'1px solid #ef444430',borderRadius:8,
+        padding:'6px 8px',color:'#ef4444',fontSize:12,cursor:'pointer',flexShrink:0}
+    },deleting?'…':'X')
+  );
+}
+
+function TrainerPanel({trainer,onLogout}){
+  const [users,setUsers]=useState([]);
+  const [helpReqs,setHelpReqs]=useState([]);
+  const [selUser,setSelUser]=useState(null);
+  const [view,setView]=useState('list');
+  const [search,setSearch]=useState('');
+  const [deletingUser,setDeletingUser]=useState(null);
+
+  // Polling de solicitudes de ayuda (cada 5s)
+  useEffect(()=>{
+    if(!trainer||!trainer.uid)return;
+    // Listener en tiempo real de solicitudes de ayuda (Firestore onSnapshot)
+    const unsub = db_fs.collection('helpRequests')
+      .where('status','==','pending')
+      .onSnapshot(snap=>{
+        const reqs = snap.docs.map(d=>d.data())
+          .filter(r=>(Date.now()-(r.createdAt||0))<30*60*1000)
+          .sort((a,b)=>(a.createdAt||0)-(b.createdAt||0));
+        setHelpReqs(reqs);
+      }, err=>console.warn('helpReqs listener error',err));
+    return()=>unsub();
+  },[trainer&&trainer.uid]);
+
+  // Polling de usuarios (cada 15s)
+  useEffect(()=>{
+    // Listener en tiempo real de usuarios (Firestore onSnapshot)
+    const unsub = db_fs.collection('users')
+      .where('role','==','user')
+      .onSnapshot(snap=>{
+        setUsers(snap.docs.map(d=>d.data()));
+      }, err=>console.warn('users listener error',err));
+    return()=>unsub();
+  },[]);
+
+  async function deleteUser(u){
+    const ok=window.confirm('¿Eliminar a '+u.name+' definitivamente?\n\nEsto borrará su perfil, rutinas y notas. No se puede deshacer.');
+    if(!ok)return;
+    setDeletingUser(u.uid||u.email);
+    try{
+      await DB.deleteUserData(u.uid||u.email,u.email,trainer);
+      setUsers(us=>us.filter(x=>(x.uid||x.email)!==(u.uid||u.email)));
+    }catch(e){
+      alert('Error al eliminar: '+(e.message||'intenta de nuevo'));
+    }
+    setDeletingUser(null);
+  }
+
+  async function resolveReq(userId){
+    try{ await DB.resolveHelp(userId); }
+    catch(e){ console.error('resolve error',e); }
+  }
+
+  if(view==='ficha'&&selUser) return React.createElement(UserFicha,{user:selUser,trainer,onBack:()=>{setView('list');setSelUser(null);}});
+
+  const filtered=search?users.filter(u=>u.name&&u.name.toLowerCase().includes(search.toLowerCase())):users;
+
+
+  return React.createElement('div',{className:'scr'},
+    React.createElement('div',{className:'wfc-top'},React.createElement('div',{className:'wfc-top-txt'},'JuandaFit')),
+    React.createElement('div',{className:'hdr'},
+      React.createElement('div',null,
+        React.createElement('div',{style:{fontWeight:800,fontSize:14,color:'#00bcd4'}},trainer.name),
+        React.createElement('div',{style:{fontSize:11,color:'#a8cdd8'}},'Panel Entrenador')
+      ),
+      React.createElement('button',{onClick:onLogout,style:{
+        border:'1px solid #00bcd440',background:'transparent',color:'#00bcd4',
+        borderRadius:10,padding:'6px 12px',fontSize:12,fontWeight:700,cursor:'pointer'
+      }},'Salir')
+    ),
+    React.createElement('div',{className:'scrollable',style:{padding:14,background:'#0d1b2a'}},
+
+      // ── Solicitudes de ayuda ──
+      helpReqs.length>0&&React.createElement('div',{style:{marginBottom:16}},
+        React.createElement('div',{style:{
+          fontSize:10,fontWeight:900,color:'#7c3aed',letterSpacing:'.1em',marginBottom:10
+        }},'SOLICITUDES ACTIVAS ('+helpReqs.length+')'),
+        helpReqs.map(req=>{
+          const mins=Math.round((Date.now()-(req.createdAt||0))/60000);
+          const urgColor=mins>=10?'#ef4444':mins>=5?'#f59e0b':'#7c3aed';
+          return React.createElement('div',{key:req.userId,style:{
+            background:'linear-gradient(135deg,#1a0a2e,#0f1a30)',
+            border:'1.5px solid '+urgColor+'55',
+            borderRadius:16,padding:'14px',marginBottom:8,
+            display:'flex',gap:12,alignItems:'flex-start'
+          }},
+            React.createElement('div',{style:{
+              width:44,height:44,borderRadius:12,flexShrink:0,
+              background:'linear-gradient(135deg,'+urgColor+','+urgColor+'aa)',
+              display:'flex',alignItems:'center',justifyContent:'center',
+              fontSize:20,boxShadow:'0 4px 14px '+urgColor+'40'
+            }},''),
+            React.createElement('div',{style:{flex:1}},
+              React.createElement('div',{style:{fontWeight:700,color:'#e2f7fb',fontSize:14}},req.userName),
+              React.createElement('div',{style:{fontSize:11,color:'#b8d5de',marginTop:2}},
+                (req.exercise?req.exercise+' · ':'')+req.day),
+              React.createElement('div',{style:{fontSize:10,color:urgColor,fontWeight:700,marginTop:4}},
+                mins<1?'Ahora mismo':'Hace '+mins+' min')
+            ),
+            React.createElement('div',{style:{display:'flex',flexDirection:'column',gap:6}},
+              React.createElement('button',{
+                onClick:()=>resolveReq(req.userId),
+                style:{padding:'7px 12px',borderRadius:10,border:'none',
+                  background:'#16a34a',color:'#fff',fontWeight:700,fontSize:11,cursor:'pointer'}
+              },'Atendido'),
+              React.createElement('button',{
+                onClick:()=>{setSelUser(users.find(u=>u.uid===req.userId||u.email===req.userEmail));setView('ficha');},
+                style:{padding:'7px 12px',borderRadius:10,border:'1px solid #00bcd440',
+                  background:'transparent',color:'#00bcd4',fontWeight:700,fontSize:11,cursor:'pointer'}
+              },'Ver ficha')
+            )
+          );
+        })
+      ),
+
+      // ── Buscador ──
+      React.createElement('input',{
+        className:'inp',
+        placeholder:'Buscar cliente...',
+        value:search,
+        onChange:e=>setSearch(e.target.value),
+        style:{marginBottom:12,fontSize:14}
+      }),
+
+      // ── Lista de clientes ──
+      React.createElement('div',{style:{fontSize:10,fontWeight:900,color:'#7aadbe',letterSpacing:'.1em',marginBottom:10}},
+        'CLIENTES ('+filtered.length+')'),
+      filtered.length===0&&React.createElement('div',{style:{textAlign:'center',color:'#7aadbe',padding:30,fontSize:13}},
+        search?'No se encontró ningún cliente.':'Sin clientes registrados aún.'),
+      filtered.map(u=>React.createElement(UserCard,{key:u.email||u.uid,u,onSelect:u=>{setSelUser(u);setView('ficha');},onDelete:deleteUser,deleting:deletingUser===(u.uid||u.email)}))
+    )
+  );
+}
+
+
+function UserFicha({user:u,trainer,onBack}){
+  var trainerColor=(trainer&&trainer.color)||'#00bcd4';
+  var trainerLight=(trainer&&trainer.light)||'#152535';
+  const [routines,setRoutines]=useState({});
+  const [weekAtt,setWeekAtt]=useState({});
+  const [selDay,setSelDay]=useState(null);
+  const [editMode,setEditMode]=useState(false);
+  const [dayRtn,setDayRtn]=useState([]);
+  const [notes,setNotes]=useState({});
+  const [loading,setLoading]=useState(false);
+  const [ver,setVer]=useState(0);
+  // Profile editing (trainer only)
+  const [profileTab,setProfileTab]=useState('routine'); // routine | profile | videos
+  const [pDraft,setPDraft]=useState({...u});
+  const [savingProfile,setSavingProfile]=useState(false);
+  const [profileSaved,setProfileSaved]=useState(false);
+  const [unlockedVideos,setUnlockedVideos]=useState(null); // null = not loaded
+  const [savingVideos,setSavingVideos]=useState(false);
+  const [videosSaved,setVideosSaved]=useState(false);
+
+  const ALL_OBJECTIVES=['Acondicionamiento','Hipertrofia','Fuerza general','Resistencia','Tonificación','Movilidad','Rehabilitación','Pérdida de grasa','Desafío de fuerza'];
+
+  function toggleObj(o){
+    const cur=Array.isArray(pDraft.objetivo)?pDraft.objetivo:(pDraft.objetivo?[pDraft.objetivo]:[]);
+    const next=cur.includes(o)?cur.filter(x=>x!==o):[...cur,o];
+    setPDraft(d=>({...d,objetivo:next}));
+  }
+
+  async function handleAvatarUpload(e){
+    const file=e.target.files&&e.target.files[0];
+    if(!file)return;
+    if(file.size>2000000){alert('Imagen demasiado grande. Máximo 2 MB.');return;}
+    try{
+      const result=await DB.uploadAvatar(u.email,file);
+      // Si usó Storage, guardar URL; si base64, guardar data URL
+      setPDraft(d=>({...d,avatar:result.url,avatarType:result.type}));
+    }catch(err){
+      // Fallback a base64 si hay error
+      if(file.size>500000){alert('Error al subir la imagen. Intenta con una más pequeña (máx 500 KB).');return;}
+      const reader=new FileReader();
+      reader.onload=ev=>setPDraft(d=>({...d,avatar:ev.target.result,avatarType:'base64'}));
+      reader.readAsDataURL(file);
+    }
+  }
+
+  async function saveProfile(){
+    setSavingProfile(true);
+    const dataToSave={...pDraft,profileStatus:'active',accessStatus:getAccessStatus(pDraft),accessBlocked:isAccessBlocked(pDraft),accessUpdatedAt:Date.now()};
+    // Trainer token enforced — 'trainer' role check in DB helper
+    await DB.saveUserProfile(u.uid||u.email,dataToSave,trainer);
+    setSavingProfile(false);
+    setProfileSaved(true);
+    setTimeout(()=>setProfileSaved(false),2500);
+  }
+
+  useEffect(()=>{
+    let mounted = true;
+    async function load(){
+      if(mounted) setLoading(true);
+      try{
+        const rtn = await DB.getAllRoutines(u.uid||u.email);
+        const att = await DB.getWeekAtt(u.uid||u.email);
+        if(mounted){ setRoutines(rtn||{}); setWeekAtt(att||{}); }
+      }catch(e){
+        console.error('UserFicha load error:', e);
+      }finally{
+        if(mounted) setLoading(false);
+      }
+    }
+    load();
+    return ()=>{ mounted=false; };
+  },[u.uid,u.email,ver]);
+
+  async function loadNotes(exIds){
+    const n={};
+    for(const id of exIds){n[id]=await DB.getNote(u.uid||u.email,id);}
+    setNotes(n);
+  }
+
+  function openDay(dk){
+    setSelDay(dk);
+    const exs=routines[dk]||[];
+    setDayRtn(exs.map(ex=>({...ex})));
+    loadNotes(exs.map(e=>e.id));
+    setEditMode(false);
+  }
+
+  async function saveDay(){
+    try{
+      await DB.saveRoutine(u.uid||u.email,selDay,dayRtn);
+      setRoutines(r=>({...r,[selDay]:dayRtn}));
+      setVer(v=>v+1);
+      setSelDay(null);
+    }catch(e){
+      console.error('saveDay error:',e);
+      alert('Error al guardar: '+(e.message||'verifica tu conexión'));
+    }
+  }
+
+  function updateEx(id,field,delta){
+    setDayRtn(rtn=>rtn.map(ex=>{
+      if(ex.id!==id)return ex;
+      const cur=parseInt(ex[field])||( field==='sets'?3:10);
+      return {...ex,[field]:Math.max(1,cur+delta)};
+    }));
+  }
+
+  const today=new Date().getDay();
+  const todayKey=DAY_KEYS[today===0?6:today-1];
+  const done=DAY_KEYS.filter(dk=>weekAtt[dk]&&weekAtt[dk].s==='done').length;
+  const missed=DAY_KEYS.filter(dk=>weekAtt[dk]&&weekAtt[dk].s==='missed').length;
+
+  // Day edit view
+  if(selDay) return React.createElement(DayEditTrainer,{
+    user:u, trainer, day:selDay, exercises:dayRtn, notes,
+    onBack:()=>setSelDay(null),
+    onSave:saveDay,
+    onUpdateEx:updateEx,
+    onSetRtn:setDayRtn,
+    onSaveNote:async(exId,note)=>{
+      await DB.saveNote(u.uid||u.email,exId,note,trainer);
+      setNotes(n=>({...n,[exId]:note}));
+    }
+  });
+
+  return React.createElement('div',{className:'scr'},
+    React.createElement('div',{className:'wfc-top'},React.createElement('div',{className:'wfc-top-txt'},'JuandaFit')),
+    React.createElement('div',{className:'hdr'},
+      React.createElement('button',{className:'hdr-back',onClick:onBack},'Volver'),
+      React.createElement('div',{className:'hdr-title'},'FICHA: '+(u.name||u.email||'Usuario').toUpperCase())
+    ),
+    // Tabs: Rutina | Perfil | Videos
+    React.createElement('div',{style:{display:'flex',background:'#152535',borderBottom:'1px solid #00bcd420',flexShrink:0}},
+      [{id:'routine',label:'Rutina'},{id:'profile',label:'Perfil'},{id:'videos',label:'🔒 Videos'}].map(t=>
+        React.createElement('button',{key:t.id,onClick:()=>{setProfileTab(t.id);if(t.id==='videos'&&unlockedVideos===null){DB.getUnlockedVideos(u.uid||u.email).then(v=>setUnlockedVideos(v||[])).catch(()=>setUnlockedVideos([]));}},style:{flex:1,padding:'10px',border:'none',background:'transparent',fontWeight:700,fontSize:11,color:profileTab===t.id?trainerColor:'#7aadbe',borderBottom:'2px solid '+(profileTab===t.id?trainerColor:'transparent'),cursor:'pointer'}},t.label)
+      )
+    ),
+    loading?React.createElement('div',{style:{flex:1,display:'flex',alignItems:'center',justifyContent:'center'}},React.createElement('div',{className:'spin'})):
+    profileTab==='profile'?
+    // ── PROFILE EDIT TAB ────────────────────────────────────────────────────
+    React.createElement('div',{className:'scrollable',style:{padding:14,background:'#0d1b2a'}},
+      // Trainer banner
+      React.createElement('div',{style:{background:'#152535',border:'1px solid '+trainerColor+'33',borderRadius:10,padding:'8px 12px',marginBottom:12,fontSize:11,color:trainerColor,fontWeight:700}},
+        '✏ Editando perfil de: '+(u.name||u.email||'Usuario')+' — Solo el entrenador puede modificar estos datos.'
+      ),
+      // Avatar
+      React.createElement('div',{style:{textAlign:'center',marginBottom:16}},
+        React.createElement(AvatarCircle,{user:pDraft,size:80,fontSize:32}),
+        React.createElement('div',{style:{marginTop:10}},
+          React.createElement('label',{style:{display:'inline-block',padding:'7px 16px',background:trainerColor,borderRadius:8,color:'#fff',fontWeight:700,fontSize:12,cursor:'pointer'}},
+            'Cambiar foto',
+            React.createElement('input',{type:'file',accept:'image/*',onChange:handleAvatarUpload,style:{display:'none'}})
+          )
+        ),
+        pDraft.avatar&&React.createElement('button',{onClick:()=>setPDraft(d=>({...d,avatar:''})),style:{marginTop:6,display:'block',margin:'6px auto 0',background:'transparent',border:'none',color:'#7aadbe',fontSize:11,cursor:'pointer'}},'✕ Quitar foto')
+      ),
+      // Fields
+      React.createElement('div',{className:'card',style:{marginBottom:10}},
+        React.createElement('div',{style:{fontSize:10,fontWeight:900,color:'#7aadbe',letterSpacing:'.08em',marginBottom:8}},'DATOS PERSONALES'),
+        [['NOMBRE','name','text'],['EDAD','age','number'],['CONDICIÓN MÉDICA','cond','text']].map(([lbl,key,type])=>
+          React.createElement('div',{key,style:{marginBottom:8}},
+            React.createElement('div',{className:'label'},lbl),
+            React.createElement('input',{className:'inp',type,value:pDraft[key]||'',onChange:e=>setPDraft(d=>({...d,[key]:e.target.value})),style:{fontSize:12}})
+          )
+        ),
+        // Sexo
+        React.createElement('div',{style:{marginBottom:8}},
+          React.createElement('div',{className:'label'},'SEXO'),
+          React.createElement('div',{style:{display:'flex',gap:6}},
+            ['Masculino','Femenino'].map(o=>React.createElement('button',{key:o,onClick:()=>setPDraft(d=>({...d,sex:o})),style:{flex:1,padding:'7px',borderRadius:8,border:'2px solid '+(pDraft.sex===o?trainerColor:'#1e4a6a'),background:pDraft.sex===o?trainerLight:'transparent',color:pDraft.sex===o?trainerColor:'#a8cdd8',fontWeight:pDraft.sex===o?700:500,fontSize:12,cursor:'pointer'}},o))
+          )
+        ),
+        // Frecuencia
+        React.createElement('div',{style:{marginBottom:8}},
+          React.createElement('div',{className:'label'},'FRECUENCIA'),
+          React.createElement('div',{style:{display:'flex',gap:6,flexWrap:'wrap'}},
+            ['1era vez','Regular','Frecuente'].map(o=>React.createElement('button',{key:o,onClick:()=>setPDraft(d=>({...d,frecuencia:o})),style:{padding:'6px 12px',borderRadius:8,border:'2px solid '+(pDraft.frecuencia===o?trainerColor:'#1e4a6a'),background:pDraft.frecuencia===o?trainerLight:'transparent',color:pDraft.frecuencia===o?trainerColor:'#a8cdd8',fontWeight:pDraft.frecuencia===o?700:500,fontSize:12,cursor:'pointer'}},o))
+          )
+        )
+      ),
+      // Measurements
+      React.createElement('div',{className:'card',style:{marginBottom:10}},
+        React.createElement('div',{style:{fontSize:10,fontWeight:900,color:'#7aadbe',letterSpacing:'.08em',marginBottom:8}},'MEDIDAS'),
+        React.createElement('div',{style:{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}},
+          [['PESO (kg)','peso','number','70'],['ESTATURA (cm)','estatura','number','175'],['IMC','imc','number','24.5'],['GRASA VISCERAL','grasaVisceral','number','8'],['GRASA CORPORAL (%)','grasaCorporal','number','18'],['MASA MUSCULAR (%)','masaMuscular','number','42']].map(([lbl,key,type,ph])=>
+            React.createElement('div',{key},
+              React.createElement('div',{className:'label'},lbl),
+              React.createElement('input',{className:'inp',type,value:pDraft[key]||'',onChange:e=>setPDraft(d=>({...d,[key]:e.target.value})),placeholder:ph,style:{fontSize:12}})
+            )
+          )
+        ),
+        React.createElement(BodyCompositionChart,{user:pDraft||u,compact:true})
+      ),
+      // Objectives (multi-select)
+      React.createElement('div',{className:'card',style:{marginBottom:10}},
+        React.createElement('div',{style:{fontSize:10,fontWeight:900,color:'#7aadbe',letterSpacing:'.08em',marginBottom:6}},'OBJETIVOS (selección múltiple)'),
+        React.createElement('div',{style:{display:'flex',gap:6,flexWrap:'wrap'}},
+          ALL_OBJECTIVES.map(o=>{
+            const cur=Array.isArray(pDraft.objetivo)?pDraft.objetivo:(pDraft.objetivo?[pDraft.objetivo]:[]);
+            const sel=cur.includes(o);
+            return React.createElement('button',{key:o,onClick:()=>toggleObj(o),style:{padding:'7px 12px',borderRadius:8,border:'2px solid '+(sel?trainerColor:'#1e4a6a'),background:sel?trainerLight:'transparent',color:sel?trainerColor:'#a8cdd8',fontWeight:sel?700:500,fontSize:12,cursor:'pointer'}},o);
+          })
+        )
+      ),
+      // Access control
+      React.createElement('div',{className:'card',style:{marginBottom:10,border:'1.5px solid '+(isAccessBlocked(pDraft)?'#ef444455':'#16a34a44')}},
+        React.createElement('div',{style:{fontSize:10,fontWeight:900,color:'#7aadbe',letterSpacing:'.08em',marginBottom:8}},'CONTROL DE ACCESO'),
+        React.createElement('div',{style:{fontSize:11,color:'#a8cdd8',lineHeight:1.5,marginBottom:10}},
+          'Usa esta opción cuando el cliente no haya pagado o deba pausar temporalmente el servicio. Si está bloqueado, podrá entrar a su cuenta, pero no podrá ver ni completar rutinas.'
+        ),
+        React.createElement('div',{style:{display:'flex',gap:8,marginBottom:10}},
+          [
+            {id:'active',label:'Activo',desc:'Puede entrenar'},
+            {id:'blocked',label:'Bloqueado',desc:'Sin acceso a rutinas'}
+          ].map(opt=>{
+            const sel=getAccessStatus(pDraft)===opt.id;
+            const color=opt.id==='blocked'?'#ef4444':'#16a34a';
+            return React.createElement('button',{key:opt.id,onClick:()=>setPDraft(d=>({...d,accessStatus:opt.id,accessBlocked:opt.id==='blocked'})),style:{flex:1,padding:'10px 8px',borderRadius:10,border:'2px solid '+(sel?color:'#1e4a6a'),background:sel?color+'20':'transparent',color:sel?color:'#a8cdd8',fontWeight:800,fontSize:12,cursor:'pointer'}},
+              React.createElement('div',null,opt.id==='blocked'?'🔒 ':'✅ ',opt.label),
+              React.createElement('div',{style:{fontSize:9,fontWeight:600,opacity:.85,marginTop:2}},opt.desc)
+            );
+          })
+        ),
+        isAccessBlocked(pDraft)&&React.createElement('div',{style:{marginBottom:8}},
+          React.createElement('div',{className:'label'},'MENSAJE PARA EL CLIENTE (opcional)'),
+          React.createElement('textarea',{className:'inp',rows:2,value:pDraft.accessReason||'',placeholder:'Ej.: Tu acceso está pausado. Comunícate con tu entrenador para reactivarlo.',onChange:e=>setPDraft(d=>({...d,accessReason:e.target.value})),style:{fontSize:12,minHeight:64}})
+        )
+      ),
+      // Dates
+      React.createElement('div',{className:'card',style:{marginBottom:16}},
+        React.createElement('div',{style:{fontSize:10,fontWeight:900,color:'#7aadbe',letterSpacing:'.08em',marginBottom:8}},'FECHAS'),
+        [['INICIO DE RUTINA','fechaInicio'],['CAMBIO DE RUTINA','fechaCambio']].map(([lbl,key])=>
+          React.createElement('div',{key,style:{marginBottom:8}},
+            React.createElement('div',{className:'label'},lbl),
+            React.createElement('input',{className:'inp',type:'date',value:pDraft[key]||'',onChange:e=>setPDraft(d=>({...d,[key]:e.target.value})),style:{fontSize:12}})
+          )
+        )
+      ),
+      // Save button
+      savingProfile?React.createElement('div',{style:{textAlign:'center'}},React.createElement('div',{className:'spin'})):
+        React.createElement('button',{className:'btn btn-primary',onClick:saveProfile,style:{background:trainerColor}},
+          profileSaved?'Guardado':'💾 Guardar perfil'
+        )
+    ):
+    profileTab==='videos'?
+    // ── VIDEOS TAB ───────────────────────────────────────────────────────────
+    React.createElement('div',{className:'scrollable',style:{padding:14,background:'#0d1b2a'}},
+      React.createElement('div',{style:{background:'#152535',border:'1px solid '+trainerColor+'33',borderRadius:10,padding:'10px 12px',marginBottom:14,fontSize:11,color:trainerColor,fontWeight:700}},
+        '🔒 Control de videos de: '+(u.name||u.email||'Usuario')+' — Activa o desactiva cada video individualmente.'
+      ),
+      React.createElement('div',{style:{background:'#0d2030',border:'1px solid #00bcd430',borderRadius:10,padding:'10px 14px',marginBottom:14,fontSize:12,color:'#7aadbe',lineHeight:1.6}},
+        '💡 Los videos bloqueados muestran al usuario un mensaje indicando que debe pagar con su entrenador. El pago se realiza fuera de la app. Una vez confirmado, activa el acceso aquí.'
+      ),
+      unlockedVideos===null
+        ? React.createElement('div',{style:{textAlign:'center',padding:40}},React.createElement('div',{className:'spin'}))
+        : React.createElement('div',null,
+            // Mostrar todos los ejercicios que tienen video
+            (()=>{
+              // Recolectar todos los ejercicios del catálogo con al menos un video
+              const allExWithVideo = ALL_EXERCISES.filter(ex=>ex.video||ex.video2||ex.video3);
+              const totalUnlocked = (unlockedVideos||[]).length;
+              const totalVideos = allExWithVideo.reduce((acc,ex)=>acc+(ex.video?1:0)+(ex.video2?1:0)+(ex.video3?1:0),0);
+              return React.createElement('div',null,
+                // Stats bar
+                React.createElement('div',{style:{display:'flex',gap:8,marginBottom:14}},
+                  React.createElement('div',{style:{flex:1,background:'#16a34a15',border:'1px solid #16a34a30',borderRadius:10,padding:'10px',textAlign:'center'}},
+                    React.createElement('div',{style:{fontWeight:900,fontSize:22,color:'#16a34a'}},totalUnlocked),
+                    React.createElement('div',{style:{fontSize:10,color:'#a8cdd8',marginTop:2}},'Desbloqueados')
+                  ),
+                  React.createElement('div',{style:{flex:1,background:'#ef444415',border:'1px solid #ef444430',borderRadius:10,padding:'10px',textAlign:'center'}},
+                    React.createElement('div',{style:{fontWeight:900,fontSize:22,color:'#ef4444'}},totalVideos-totalUnlocked),
+                    React.createElement('div',{style:{fontSize:10,color:'#a8cdd8',marginTop:2}},'Bloqueados')
+                  ),
+                  React.createElement('div',{style:{flex:1,background:'#00bcd415',border:'1px solid #00bcd430',borderRadius:10,padding:'10px',textAlign:'center'}},
+                    React.createElement('div',{style:{fontWeight:900,fontSize:22,color:'#00bcd4'}},totalVideos),
+                    React.createElement('div',{style:{fontSize:10,color:'#a8cdd8',marginTop:2}},'Total')
+                  )
+                ),
+                // Botones rápidos
+                React.createElement('div',{style:{display:'flex',gap:8,marginBottom:14}},
+                  React.createElement('button',{onClick:()=>{
+                    const allKeys=ALL_EXERCISES.filter(ex=>ex.video||ex.video2||ex.video3).flatMap(ex=>{
+                      const ks=[];
+                      if(ex.video)ks.push(ex.id+'_video');
+                      if(ex.video2)ks.push(ex.id+'_video2');
+                      if(ex.video3)ks.push(ex.id+'_video3');
+                      return ks;
+                    });
+                    setUnlockedVideos(allKeys);
+                  },style:{flex:1,padding:'8px',borderRadius:8,border:'1px solid #16a34a40',background:'#16a34a15',color:'#16a34a',fontWeight:700,fontSize:11,cursor:'pointer'}},'✅ Desbloquear todo'),
+                  React.createElement('button',{onClick:()=>setUnlockedVideos([]),style:{flex:1,padding:'8px',borderRadius:8,border:'1px solid #ef444440',background:'#ef444415',color:'#ef4444',fontWeight:700,fontSize:11,cursor:'pointer'}},'🔒 Bloquear todo')
+                ),
+                // Lista por ejercicio
+                allExWithVideo.map(ex=>{
+                  const videoKeys=[
+                    ...(ex.video?[{key:ex.id+'_video',label:'Tutorial principal'}]:[]),
+                    ...(ex.video2?[{key:ex.id+'_video2',label:'Tutorial alternativo'}]:[]),
+                    ...(ex.video3?[{key:ex.id+'_video3',label:'Tutorial extra'}]:[])
+                  ];
+                  const allUnlocked=videoKeys.every(vk=>(unlockedVideos||[]).includes(vk.key));
+                  const someUnlocked=videoKeys.some(vk=>(unlockedVideos||[]).includes(vk.key));
+                  return React.createElement('div',{key:ex.id,style:{background:'#152535',borderRadius:12,marginBottom:8,overflow:'hidden',border:'1px solid '+(allUnlocked?'#16a34a30':someUnlocked?'#fbbf2430':'#1e3347')}},
+                    // Header del ejercicio
+                    React.createElement('div',{style:{display:'flex',alignItems:'center',gap:10,padding:'10px 12px',background:'#0d1b2a20'}},
+                      React.createElement('div',{style:{flex:1}},
+                        React.createElement('div',{style:{fontWeight:700,fontSize:13,color:'#e2f7fb'}},ex.name),
+                        React.createElement('div',{style:{fontSize:10,color:'#7aadbe',marginTop:2}},ex.zone)
+                      ),
+                      React.createElement('div',{style:{fontSize:10,color:allUnlocked?'#16a34a':someUnlocked?'#fbbf24':'#64748b',fontWeight:700,background:allUnlocked?'#16a34a20':someUnlocked?'#fbbf2420':'#64748b20',borderRadius:6,padding:'3px 8px'}},
+                        allUnlocked?'✅ Activo':someUnlocked?'⚡ Parcial':'🔒 Bloq.'
+                      )
+                    ),
+                    // Videos individuales
+                    videoKeys.map(vk=>{
+                      const isOn=(unlockedVideos||[]).includes(vk.key);
+                      return React.createElement('div',{key:vk.key,style:{display:'flex',alignItems:'center',gap:10,padding:'8px 12px',borderTop:'1px solid #1e3347'}},
+                        React.createElement('div',{style:{flex:1,fontSize:12,color:isOn?'#e2f7fb':'#64748b'}},
+                          React.createElement('span',{style:{marginRight:6}},isOn?'▶':'🔒'),
+                          vk.label
+                        ),
+                        React.createElement('button',{
+                          onClick:()=>{
+                            setUnlockedVideos(prev=>{
+                              const current=Array.isArray(prev)?prev:[];
+                              return isOn?current.filter(k=>k!==vk.key):[...current,vk.key];
+                            });
+                          },
+                          style:{padding:'5px 14px',borderRadius:8,border:'none',fontWeight:700,fontSize:11,cursor:'pointer',
+                            background:isOn?'#16a34a':'#ef444420',color:isOn?'#fff':'#ef4444'}
+                        },isOn?'Activo':'Bloqueado')
+                      );
+                    })
+                  );
+                })
+              );
+            })(),
+            // Save button
+            React.createElement('div',{style:{marginTop:16}},
+              savingVideos?React.createElement('div',{style:{textAlign:'center'}},React.createElement('div',{className:'spin'})):
+              React.createElement('button',{className:'btn btn-primary',onClick:async()=>{
+                setSavingVideos(true);
+                try{
+                  await DB.setUnlockedVideos(u.uid||u.email, unlockedVideos||[]);
+                  setVideosSaved(true);
+                  setTimeout(()=>setVideosSaved(false),2500);
+                }catch(e){
+                  alert('Error al guardar videos: '+(e.message||'intenta de nuevo'));
+                }
+                setSavingVideos(false);
+              },style:{background:trainerColor}},
+                videosSaved?'✅ Guardado':'💾 Guardar cambios de videos'
+              )
+            )
+          )
+    ):
+    // ── ROUTINE TAB (existing content) ──────────────────────────────────────
+    React.createElement('div',{className:'scrollable',style:{padding:14,background:'#0d1b2a'}},
+      // User card
+      React.createElement('div',{className:'card'},
+        React.createElement('div',{style:{display:'flex',gap:12,alignItems:'center',marginBottom:10}},
+          React.createElement(AvatarCircle,{user:u,size:50,fontSize:20}),
+          React.createElement('div',null,
+            React.createElement('div',{style:{fontWeight:900,fontSize:16,color:'#e2f7fb'}},u.name),
+            React.createElement('div',{style:{fontSize:12,color:u.status==='activo'?'#22c55e':u.status==='warning'?'#eab308':'#94a3b8',fontWeight:600}},
+              u.status==='activo'?'Activo ahora':u.status==='warning'?'Actividad reciente':'⚪ Inactivo'),
+            React.createElement('div',{style:{marginTop:5}},React.createElement('span',{style:accessBadgeStyle(pDraft)},accessLabel(pDraft)))
+          )
+        ),
+        // Profile info
+        [['Edad',u.age],['Frecuencia',u.frecuencia],['Peso',u.peso?(u.peso+' kg'):null],['Estatura',u.estatura?(u.estatura+' cm'):null],['IMC',(u.imc||u.imc===0)?u.imc:null],['Grasa visceral',(u.grasaVisceral||u.grasaVisceral===0)?u.grasaVisceral:null],['Grasa corporal',(u.grasaCorporal||u.grasaCorporal===0)?(u.grasaCorporal+'%'):((u.porcentajeGrasa||u.porcentajeGrasa===0)?(u.porcentajeGrasa+'%'):null)],['Masa muscular',(u.masaMuscular||u.masaMuscular===0)?(u.masaMuscular+'%'):((u.porcentajeMasa||u.porcentajeMasa===0)?(u.porcentajeMasa+'%'):null)],['Condición',u.cond&&u.cond!=='No aplica'?u.cond:null]].filter(f=>f[1]).map(([l,v])=>
+          React.createElement('div',{key:l,style:{display:'flex',justifyContent:'space-between',padding:'4px 0',borderTop:'1px solid #1e3347'}},
+            React.createElement('span',{style:{fontSize:11,color:'#7aadbe'}},l),
+            React.createElement('span',{style:{fontSize:11,color:'#e2f7fb',fontWeight:700}},v)
+          )
+        ),
+        // Objectives (multi)
+        (()=>{const obs=Array.isArray(u.objetivo)?u.objetivo:(u.objetivo?[u.objetivo]:[]);return obs.length>0&&React.createElement('div',{style:{borderTop:'1px solid #1e3347',paddingTop:6,marginTop:4}},React.createElement('div',{style:{fontSize:10,color:'#7aadbe',fontWeight:700,marginBottom:5}},'OBJETIVOS'),React.createElement('div',{style:{display:'flex',gap:4,flexWrap:'wrap'}},obs.map((o,i)=>React.createElement('span',{key:i,style:{background:'#fff8f5',border:'1px solid #00bcd444',borderRadius:6,padding:'3px 8px',color:'#00bcd4',fontWeight:700,fontSize:10}},o))));})()
+      ),
+      // Week summary
+      React.createElement('div',{className:'card'},
+        React.createElement('div',{style:{fontSize:10,fontWeight:900,color:'#7aadbe',letterSpacing:'.08em',marginBottom:8}},'ESTA SEMANA'),
+        React.createElement('div',{style:{display:'flex',gap:4,marginBottom:10}},
+          DAY_KEYS.map((dk,i)=>{
+            const att=weekAtt[dk];const s=att?att.s:null;
+            const hasRtn=(routines[dk]||[]).length>0;
+            const bg=s==='done'?'#16a34a':s==='repuesto'?'#6366f1':s==='missed'&&hasRtn?'#00bcd4':hasRtn?'#94a3b8':'#e2e8f0';
+            return React.createElement('div',{key:dk,style:{flex:1,textAlign:'center'}},
+              React.createElement('div',{style:{height:30,background:bg,borderRadius:6,display:'flex',alignItems:'center',justifyContent:'center',fontSize:10,color:'#fff',fontWeight:900,marginBottom:2}},s==='done'?'V':s==='missed'&&hasRtn?'!':hasRtn?'·':'-'),
+              React.createElement('div',{style:{fontSize:7,color:'#7aadbe',fontWeight:700}},['L','M','Mi','J','V','S','D'][i])
+            );
+          })
+        ),
+        React.createElement('div',{style:{display:'flex',gap:8}},
+          React.createElement('div',{style:{flex:1,textAlign:'center',background:'#16a34a15',borderRadius:8,padding:'6px'}},React.createElement('div',{style:{fontSize:20,fontWeight:900,color:'#16a34a'}},done),React.createElement('div',{style:{fontSize:9,color:'#a8cdd8'}},'Entrenados')),
+          React.createElement('div',{style:{flex:1,textAlign:'center',background:'#00bcd420',borderRadius:8,padding:'6px'}},React.createElement('div',{style:{fontSize:20,fontWeight:900,color:'#00bcd4'}},missed),React.createElement('div',{style:{fontSize:9,color:'#a8cdd8'}},'Perdidos'))
+        )
+      ),
+      // Routine by day
+      React.createElement('div',{style:{fontSize:10,fontWeight:900,color:'#7aadbe',letterSpacing:'.08em',marginBottom:8}},'RUTINA SEMANAL'),
+      DAY_KEYS.map((dk,i)=>{
+        const exs=routines[dk]||[];
+        const att=weekAtt[dk];const s=att?att.s:null;
+        return React.createElement('div',{key:dk,className:'card',style:{padding:0,overflow:'hidden',marginBottom:8}},
+          React.createElement('div',{style:{background:'#152535',padding:'8px 12px',display:'flex',justifyContent:'space-between',alignItems:'center'}},
+            React.createElement('div',null,
+              React.createElement('span',{style:{fontWeight:800,color:trainerColor,fontSize:13}},DAY_LABELS[dk]),
+              React.createElement('span',{style:{fontSize:10,color:s==='done'?'#16a34a':s==='missed'?'#00bcd4':'#94a3b8',fontWeight:600,marginLeft:8}},
+                s==='done'?'Completado':s==='missed'?'No completado':'',
+                ' · '+(exs.length||0)+' ej.'
+              )
+            ),
+            React.createElement('button',{onClick:()=>openDay(dk),style:{background:trainerColor,border:'none',borderRadius:6,padding:'5px 12px',color:'#fff',fontWeight:700,fontSize:11,cursor:'pointer'}},'Editar')
+          ),
+          exs.length===0&&React.createElement('div',{style:{padding:'10px 12px',fontSize:12,color:'#7aadbe'}},'Sin ejercicios asignados'),
+          exs.map((ex,ei)=>React.createElement('div',{key:ex.id,style:{display:'flex',alignItems:'center',gap:10,padding:'8px 12px',borderTop:'1px solid #1e3347'}},
+            React.createElement('div',{style:{width:36,height:36,borderRadius:8,background:exColor(ex.id)+'22',border:'1px solid '+exColor(ex.id)+'33',overflow:'hidden',flexShrink:0,display:'flex',alignItems:'center',justifyContent:'center',fontSize:10,fontWeight:900,color:exColor(ex.id)}},
+              getExerciseImage(ex)?React.createElement('img',{loading:'lazy',decoding:'async',src:getExerciseImage(ex),style:{width:'100%',height:'100%',objectFit:'contain'}}):React.createElement('img',{loading:'lazy',decoding:'async',src:IMG_PLACEHOLDER,style:{width:'100%',height:'100%',objectFit:'contain',opacity:0.4}})
+            ),
+            React.createElement('div',{style:{flex:1}},
+              React.createElement('div',{style:{fontWeight:700,fontSize:12,color:'#e2f7fb'}},ex.name),
+              React.createElement('div',{style:{fontSize:10,color:'#7aadbe'}},(ex.sets||3)+' × '+(ex.reps||10)+' reps'+(ex.rest?' · '+ex.rest+'s':''))
+            )
+          ))
+        );
+      })
+    )
+  );
+}
+
+// ─── DAY EDIT (trainer edits user routine) ────────────────────────────────────
+function DayEditTrainer({user:u,trainer,day,exercises,notes,onBack,onSave,onUpdateEx,onSetRtn,onSaveNote}){
+  const [tab,setTab]=useState('exercises'); // exercises | add
+  const [openCat,setOpenCat]=useState(null);
+  const [noteEditing,setNoteEditing]=useState(null); // exerciseId
+  const [noteDraft,setNoteDraft]=useState('');
+  const [exEditing,setExEditing]=useState(null); // exerciseId for global info edit
+  const [exInfoDraft,setExInfoDraft]=useState({links:[],description:''}); // draft glo
+  const [exEditErr,setExEditErr]=useState(''); // error al abrir/guardar info ejerciciobal info (links: [{url,label}])
+  const [exInfoCache,setExInfoCache]=useState({}); // exId -> info from Firestore
+  const [savingEx,setSavingEx]=useState(false);
+  const [catalogVersion,setCatalogVersion]=useState(0);
+  const [newExOpen,setNewExOpen]=useState(false);
+  const [newExDraft,setNewExDraft]=useState(defaultNewExerciseDraft());
+  const [savingNewEx,setSavingNewEx]=useState(false);
+  const [deletingExId,setDeletingExId]=useState(null);
+
+  // Load global custom exercise catalog and global deletions; keep them synced for all trainers.
+  useEffect(()=>{
+    let mounted=true;
+    function bump(){ if(mounted)setCatalogVersion(v=>v+1); }
+    function applyCatalog(customs){
+      mergeCustomExercises(customs||[]);
+      bump();
+    }
+    function applyDeleted(ids){
+      applyDeletedExerciseIds(ids||[]);
+      bump();
+    }
+    async function loadCustomCatalog(){
+      try{
+        const customs = await DB.getCustomExercises();
+        applyCatalog(customs);
+      }catch(e){
+        console.warn('custom exercise catalog error:', e);
+      }
+    }
+    async function loadDeletedCatalog(){
+      try{
+        const ids = await DB.getDeletedExerciseIds();
+        applyDeleted(ids);
+      }catch(e){
+        console.warn('deleted exercise catalog error:', e);
+      }
+    }
+    loadDeletedCatalog();
+    loadCustomCatalog();
+    const unsubCustom = DB.watchCustomExercises(applyCatalog);
+    const unsubDeleted = DB.watchDeletedExercises(applyDeleted);
+    return ()=>{
+      mounted=false;
+      if(typeof unsubCustom==='function')unsubCustom();
+      if(typeof unsubDeleted==='function')unsubDeleted();
+    };
+  },[]);
+
+  // Load exInfo for all exercises in this day
+  useEffect(()=>{
+    let mounted=true;
+    async function loadAllInfo(){
+      const cache={};
+      for(const ex of exercises){
+        try{
+          const info=await DB.getExInfo(ex.id);
+          if(info)cache[ex.id]=info;
+        }catch(e){
+          console.warn('getExInfo cache error:', ex.id, e);
+        }
+      }
+      if(mounted) setExInfoCache(cache);
+    }
+    if(exercises.length)loadAllInfo();
+    else setExInfoCache({});
+    return ()=>{mounted=false;};
+  },[exercises]);
+
+  async function openExEdit(exId){
+    setExEditErr('');
+    let info;
+    try{ info=await DB.getExInfo(exId); }
+    catch(e){ setExEditErr('Error al cargar info: '+(e.message||'verifica conexión')); return; }
+    const baseEx=exercises.find(e=>e.id===exId)||{};
+    let links=[];
+    if(!info){
+      // Nunca editado: pre-cargar links originales del catálogo para comodidad
+      const defaultLabels=['Tutorial principal','Tutorial alternativo','Tutorial extra'];
+      [baseEx.video,baseEx.video2,baseEx.video3].forEach((u,i)=>{
+        if(u)links.push({url:u,label:defaultLabels[i]});
+      });
+      if(baseEx.link)links.push({url:baseEx.link,label:baseEx.linkLabel||'Enlace'});
+    } else if(Array.isArray(info.links)){
+      // Ya fue editado: respetar su lista aunque sea vacía
+      links=info.links.map(l=>({url:l.url||'',label:l.label||''}));
+    } else {
+      // Registro legacy (campos video/video2/video3) → migrar
+      const defaultLabels=['Tutorial principal','Tutorial alternativo','Tutorial extra'];
+      ['video','video2','video3'].forEach((k,i)=>{
+        if(info[k])links.push({url:info[k],label:defaultLabels[i]});
+      });
+      if(info.link)links.push({url:info.link,label:info.linkLabel||'Enlace del entrenador'});
+    }
+    setExInfoDraft({name:(info&&info.name)||baseEx.name||'',links,description:info?info.description||'':'',customImg:(info&&info.customImg)||baseEx.customImg||''});
+    setExEditing(exId);
+  }
+
+  async function saveExInfo(){
+    setSavingEx(true);
+    try{
+      const cleanLinks=(exInfoDraft.links||[]).filter(l=>l.url&&l.url.trim());
+      const baseEx=(exercises.find(e=>e.id===exEditing)||{});
+      const dataToSave={name:(exInfoDraft.name||'').trim()||baseEx.name||'',links:cleanLinks,description:exInfoDraft.description||'',customImg:exInfoDraft.customImg||''};
+      await DB.saveExInfo(exEditing,dataToSave);
+      setExInfoCache(c=>({...c,[exEditing]:{...dataToSave}}));
+      onSetRtn(rtn=>Array.isArray(rtn)?rtn.map(item=>item&&item.id===exEditing?{...item,name:dataToSave.name||item.name}:item):rtn);
+      mergeCustomExercises([{...baseEx,...dataToSave,id:exEditing,category:baseEx.category||baseEx.cat}]);
+      setCatalogVersion(v=>v+1);
+      setExEditing(null);
+    }catch(e){
+      console.error('saveExInfo error:',e);
+      alert('Error al guardar info: '+(e.message||'verifica conexión'));
+    }
+    setSavingEx(false);
+  }
+
+  function removeEx(id){onSetRtn(rtn=>rtn.filter(e=>e.id!==id));}
+  function addEx(ex){
+    if(exercises.find(e=>e.id===ex.id)){onSetRtn(rtn=>rtn.filter(e=>e.id!==ex.id));return;}
+    onSetRtn(rtn=>[...rtn,{...ex,sets:3,reps:10,rest:60}]);
+  }
+
+  function handleNewExerciseImageFile(file){
+    if(!file)return;
+    compressImageFile(file, dataUrl=>setNewExDraft(d=>({...d,image:dataUrl})), ()=>alert('No se pudo cargar la imagen.'));
+  }
+
+  function handleEditExerciseImageFile(file){
+    if(!file)return;
+    compressImageFile(file, dataUrl=>setExInfoDraft(d=>({...d,customImg:dataUrl})), ()=>alert('No se pudo cargar la imagen.'));
+  }
+
+  async function createNewExercise(){
+    const name=(newExDraft.name||'').trim();
+    const category=newExDraft.category;
+    if(!name){ alert('Escribe el nombre del ejercicio.'); return; }
+    if(!category || !CAT[category]){ alert('Selecciona una categoría válida.'); return; }
+    setSavingNewEx(true);
+    try{
+      const id='C'+Date.now().toString(36).toUpperCase()+Math.random().toString(36).slice(2,6).toUpperCase();
+      const link=(newExDraft.link||'').trim();
+      const image=(newExDraft.image||'').trim();
+      const ex={
+        id, name, category, custom:true, customImg:image,
+        zone:'Personalizado', machine:'Personalizado', video:link
+      };
+      const info={
+        ...ex,
+        isCustomExercise:true,
+        links:link?[{url:link,label:'Tutorial principal'}]:[],
+        description:(newExDraft.description||'').trim(),
+        createdBy:(trainer&&trainer.uid)||(trainer&&trainer.email)||'',
+        createdAt:Date.now()
+      };
+      await DB.saveCustomExercise(ex,info);
+      mergeCustomExercises([info]);
+      setExInfoCache(c=>({...c,[id]:info}));
+      setCatalogVersion(v=>v+1);
+      setOpenCat(category);
+      setNewExDraft(defaultNewExerciseDraft());
+      setNewExOpen(false);
+      setTab('add');
+      alert('Ejercicio creado en el catálogo global. Para asignarlo, selecciónalo en la categoría correspondiente y luego guarda la rutina del cliente.');
+    }catch(e){
+      console.error('createNewExercise error:',e);
+      alert('Error al crear el ejercicio: '+(e.message||'verifica conexión'));
+    }
+    setSavingNewEx(false);
+  }
+
+  async function deleteExerciseFromApp(ex){
+    if(!ex || !ex.id)return;
+    const msg = '¿Eliminar "'+(ex.name||ex.id)+'" del catálogo global de la app?\n\nDesaparecerá para entrenadores y clientes al volver a cargar/entrar. Si estaba en esta rutina, también se quitará aquí.';
+    if(!confirm(msg))return;
+    setDeletingExId(ex.id);
+    try{
+      await DB.deleteExerciseFromApp(ex);
+      applyDeletedExerciseIds([ex.id]);
+      setExInfoCache(c=>{ const n={...c}; delete n[ex.id]; return n; });
+      onSetRtn(rtn=>Array.isArray(rtn)?rtn.filter(item=>item&&item.id!==ex.id):rtn);
+      if(exEditing===ex.id)setExEditing(null);
+      setCatalogVersion(v=>v+1);
+      alert('Ejercicio eliminado del catálogo global.');
+    }catch(e){
+      console.error('deleteExerciseFromApp error:', e);
+      alert('No se pudo eliminar el ejercicio: '+(e.message||'verifica conexión y permisos de Firestore'));
+    }
+    setDeletingExId(null);
+  }
+
+  return React.createElement('div',{className:'scr'},
+    React.createElement('div',{className:'wfc-top'},React.createElement('div',{className:'wfc-top-txt'},'JuandaFit')),
+    React.createElement('div',{className:'hdr'},
+      React.createElement('button',{className:'hdr-back',onClick:onBack},'Volver'),
+      React.createElement('div',{className:'hdr-title'},'RUTINA '+DAY_LABELS[day].toUpperCase())
+    ),
+    // Trainer banner
+    React.createElement('div',{style:{background:'#152535',borderBottom:'1px solid '+trainer.color+'33',padding:'6px 14px',fontSize:11,color:trainer.color,fontWeight:700,flexShrink:0}},
+      'Editando rutina de: '+u.name
+    ),
+    // Tabs
+    React.createElement('div',{style:{display:'flex',background:'#152535',borderBottom:'1px solid #00bcd420',flexShrink:0}},
+      [{id:'exercises',label:'Ejercicios ('+exercises.length+')'},{id:'add',label:'+ Añadir ejercicio'}].map(t=>
+        React.createElement('button',{key:t.id,onClick:()=>setTab(t.id),style:{flex:1,padding:'10px',border:'none',background:'transparent',fontWeight:700,fontSize:12,color:tab===t.id?trainer.color:'#7aadbe',borderBottom:'2px solid '+(tab===t.id?trainer.color:'transparent'),cursor:'pointer'}},t.label)
+      )
+    ),
+    React.createElement('div',{className:'scrollable',style:{padding:14,background:'#0d1b2a'}},
+      tab==='exercises'&&React.createElement('div',null,
+        exercises.length===0&&React.createElement('div',{style:{textAlign:'center',color:'#7aadbe',padding:20}},'Sin ejercicios. Añade desde la pestaña +'),
+        exercises.map((ex,i)=>React.createElement('div',{key:ex.id,className:'card',style:{padding:0,overflow:'hidden',marginBottom:10}},
+          // Exercise header
+          React.createElement('div',{style:{display:'flex',alignItems:'center',gap:10,padding:'10px 12px'}},
+            React.createElement('div',{style:{width:40,height:40,borderRadius:8,background:exColor(ex.id)+'22',border:'1px solid '+exColor(ex.id)+'33',overflow:'hidden',flexShrink:0,display:'flex',alignItems:'center',justifyContent:'center',fontSize:11,fontWeight:900,color:exColor(ex.id)}},
+              getExerciseImage(ex,exInfoCache[ex.id])?React.createElement('img',{loading:'lazy',decoding:'async',src:getExerciseImage(ex,exInfoCache[ex.id]),style:{width:'100%',height:'100%',objectFit:'contain'}}):React.createElement('img',{loading:'lazy',decoding:'async',src:IMG_PLACEHOLDER,style:{width:'100%',height:'100%',objectFit:'contain',opacity:0.4}})
+            ),
+            React.createElement('div',{style:{flex:1}},
+              React.createElement('div',{style:{fontWeight:700,fontSize:13,color:'#e2f7fb'}},getExerciseName(ex,exInfoCache[ex.id])),
+              // Series/reps controls
+              React.createElement('div',{style:{display:'flex',gap:6,marginTop:5,alignItems:'center'}},
+                React.createElement('div',{style:{display:'flex',alignItems:'center',gap:4,background:'#152535',border:'1px solid '+trainer.color+'44',borderRadius:7,padding:'2px 6px'}},
+                  React.createElement('button',{onClick:()=>onUpdateEx(ex.id,'sets',-1),style:{background:'none',border:'none',color:trainer.color,fontWeight:900,fontSize:16,cursor:'pointer',lineHeight:1,padding:'0 2px'}},'-'),
+                  React.createElement('span',{style:{fontSize:11,fontWeight:800,color:trainer.color,minWidth:20,textAlign:'center'}},(ex.sets||3)+' S'),
+                  React.createElement('button',{onClick:()=>onUpdateEx(ex.id,'sets',1),style:{background:'none',border:'none',color:trainer.color,fontWeight:900,fontSize:16,cursor:'pointer',lineHeight:1,padding:'0 2px'}},'+')
+                ),
+                React.createElement('span',{style:{color:'#7aadbe',fontSize:12}},'×'),
+                React.createElement('div',{style:{display:'flex',alignItems:'center',gap:4,background:'#152535',border:'1px solid '+trainer.color+'44',borderRadius:7,padding:'2px 6px'}},
+                  React.createElement('button',{onClick:()=>onUpdateEx(ex.id,'reps',-1),style:{background:'none',border:'none',color:trainer.color,fontWeight:900,fontSize:16,cursor:'pointer',lineHeight:1,padding:'0 2px'}},'-'),
+                  React.createElement('span',{style:{fontSize:11,fontWeight:800,color:trainer.color,minWidth:20,textAlign:'center'}},(ex.reps||10)+' R'),
+                  React.createElement('button',{onClick:()=>onUpdateEx(ex.id,'reps',1),style:{background:'none',border:'none',color:trainer.color,fontWeight:900,fontSize:16,cursor:'pointer',lineHeight:1,padding:'0 2px'}},'+')
+                )
+              )
+            ),
+            React.createElement('button',{onClick:()=>removeEx(ex.id),style:{background:'#3d0d0d',border:'1px solid #ef444444',borderRadius:6,padding:'4px 8px',color:'#ef4444',fontSize:11,fontWeight:700,cursor:'pointer'}},'✕')
+          ),
+// Editar info global del ejercicio
+          exEditing===ex.id?
+            React.createElement('div',{style:{padding:'10px 12px',borderTop:'1px solid #1e3347',background:'#0d1b2a'}},
+              React.createElement('div',{style:{fontSize:10,fontWeight:900,color:'#00bcd4',letterSpacing:'.08em',marginBottom:8}},'INFO GLOBAL DEL EJERCICIO'),
+              React.createElement('div',{style:{fontSize:11,color:'#7aadbe',marginBottom:10}},'Aplica para todos los clientes con este ejercicio.'),
+              React.createElement('div',{style:{marginBottom:10}},
+                React.createElement('div',{style:{fontSize:10,fontWeight:700,color:'#7aadbe',marginBottom:4}},'NOMBRE DEL EJERCICIO'),
+                React.createElement('input',{
+                  value:exInfoDraft.name||'',
+                  onChange:e=>setExInfoDraft(d=>({...d,name:e.target.value})),
+                  placeholder:'Nombre del ejercicio',
+                  style:{width:'100%',padding:'8px',borderRadius:8,border:'1.5px solid #00bcd430',background:'#152535',fontSize:12,color:'#e2f7fb',boxSizing:'border-box',display:'block'}
+                })
+              ),
+              React.createElement('div',{style:{marginBottom:10}},
+                React.createElement('div',{style:{fontSize:10,fontWeight:700,color:'#7aadbe',marginBottom:4}},'IMAGEN DEL EJERCICIO'),
+                exInfoDraft.customImg&&React.createElement('img',{loading:'lazy',decoding:'async',src:exInfoDraft.customImg,style:{width:70,height:70,objectFit:'contain',borderRadius:10,background:'#152535',border:'1px solid #1e4a6a',marginBottom:6}}),
+                React.createElement('input',{
+                  value:exInfoDraft.customImg||'',
+                  onChange:e=>setExInfoDraft(d=>({...d,customImg:e.target.value})),
+                  placeholder:'URL de imagen o usa el botón de archivo',
+                  style:{width:'100%',padding:'8px',borderRadius:8,border:'1.5px solid #00bcd430',background:'#152535',fontSize:12,color:'#e2f7fb',boxSizing:'border-box',display:'block',marginBottom:6}
+                }),
+                React.createElement('input',{type:'file',accept:'image/*',onChange:e=>handleEditExerciseImageFile(e.target.files&&e.target.files[0]),style:{fontSize:11,color:'#7aadbe',width:'100%'}})
+              ),
+              // Descripción
+              React.createElement('div',{style:{marginBottom:10}},
+                React.createElement('div',{style:{fontSize:10,fontWeight:700,color:'#7aadbe',marginBottom:4}},'DESCRIPCIÓN'),
+                React.createElement('textarea',{
+                  value:exInfoDraft.description||'',
+                  onChange:e=>setExInfoDraft(d=>({...d,description:e.target.value})),
+                  rows:3,
+                  placeholder:'Descripción o instrucciones del ejercicio...',
+                  style:{width:'100%',padding:'8px',borderRadius:8,border:'1.5px solid #00bcd430',background:'#152535',fontSize:12,color:'#e2f7fb',boxSizing:'border-box',display:'block'}
+                })
+              ),
+              // Links/videos
+              React.createElement('div',{style:{marginBottom:10}},
+                React.createElement('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6}},
+                  React.createElement('div',{style:{fontSize:10,fontWeight:700,color:'#7aadbe'}},'VIDEOS / ENLACES ('+(exInfoDraft.links||[]).length+')'),
+                  React.createElement('button',{
+                    onClick:()=>setExInfoDraft(d=>({...d,links:[...(d.links||[]),{url:'',label:''}]})),
+                    style:{padding:'3px 8px',borderRadius:6,border:'1px solid #00bcd440',background:'transparent',color:'#00bcd4',fontSize:11,cursor:'pointer'}
+                  },'+ Añadir')
+                ),
+                (exInfoDraft.links||[]).map((lk,idx2)=>
+                  React.createElement('div',{key:idx2,style:{display:'flex',gap:6,marginBottom:6,alignItems:'center'}},
+                    React.createElement('input',{
+                      value:lk.label||'',
+                      onChange:e=>setExInfoDraft(d=>({...d,links:d.links.map((l,i)=>i===idx2?{...l,label:e.target.value}:l)})),
+                      placeholder:'Nombre (ej: Tutorial)',
+                      style:{width:90,padding:'5px 7px',borderRadius:7,border:'1px solid #1e4a6a',background:'#152535',fontSize:11,color:'#e2f7fb'}
+                    }),
+                    React.createElement('input',{
+                      value:lk.url||'',
+                      onChange:e=>setExInfoDraft(d=>({...d,links:d.links.map((l,i)=>i===idx2?{...l,url:e.target.value}:l)})),
+                      placeholder:'URL del video o enlace',
+                      style:{flex:1,padding:'5px 7px',borderRadius:7,border:'1px solid #1e4a6a',background:'#152535',fontSize:11,color:'#e2f7fb'}
+                    }),
+                    React.createElement('button',{
+                      onClick:()=>setExInfoDraft(d=>({...d,links:d.links.filter((_,i)=>i!==idx2)})),
+                      style:{padding:'4px 7px',borderRadius:6,border:'none',background:'#ef444420',color:'#ef4444',fontSize:12,cursor:'pointer'}
+                    },'X')
+                  )
+                )
+              ),
+              // Botones
+              React.createElement('div',{style:{display:'flex',gap:8,flexWrap:'wrap'}},
+                React.createElement('button',{
+                  onClick:saveExInfo,
+                  disabled:savingEx,
+                  style:{flex:1,minWidth:110,padding:'8px',borderRadius:10,border:'none',background:'linear-gradient(135deg,#00bcd4,#0097a7)',color:'#fff',fontWeight:700,fontSize:12,cursor:'pointer'}
+                },savingEx?'Guardando...':'Guardar'),
+                React.createElement('button',{
+                  onClick:()=>deleteExerciseFromApp(ex),
+                  disabled:deletingExId===ex.id,
+                  style:{flex:1,minWidth:125,padding:'8px',borderRadius:10,border:'1px solid #ef444455',background:'#3d0d0d',color:'#ef4444',fontWeight:800,fontSize:12,cursor:'pointer'}
+                },deletingExId===ex.id?'Eliminando...':'Eliminar de la app'),
+                React.createElement('button',{
+                  onClick:()=>setExEditing(null),
+                  style:{padding:'8px 14px',borderRadius:10,border:'1px solid #1e4a6a',background:'transparent',color:'#7aadbe',fontSize:12,cursor:'pointer'}
+                },'Cancelar')
+              )
+            ):
+            // Botón para abrir edición
+            React.createElement('div',{
+              onClick:()=>openExEdit(ex.id),
+              style:{padding:'6px 12px',borderTop:'1px solid #1e3347',cursor:'pointer',display:'flex',justifyContent:'space-between',alignItems:'center'}
+            },
+              exInfoCache[ex.id]&&(exInfoCache[ex.id].description||(exInfoCache[ex.id].links&&exInfoCache[ex.id].links.length>0))?
+                React.createElement('span',{style:{fontSize:10,color:'#00bcd4',fontWeight:700}},'Info del ejercicio activa')
+              : React.createElement('span',{style:{fontSize:10,color:'#7aadbe'}},'Agregar video / descripción global'),
+              React.createElement('span',{style:{fontSize:11,color:'#00bcd4',fontWeight:700}},'Editar')
+            ),
+          exEditErr&&React.createElement('div',{style:{padding:'4px 12px',fontSize:11,color:'#ff6b6b'}},exEditErr),
+          // Note section
+
+          noteEditing===ex.id?
+            React.createElement('div',{style:{padding:'0 12px 10px',borderTop:'1px solid #1e3347'}},
+              React.createElement('div',{style:{fontSize:9,color:trainer.color,fontWeight:700,marginBottom:4}},'Nota del entrenador:'),
+              React.createElement('textarea',{value:noteDraft,onChange:e=>setNoteDraft(e.target.value),rows:3,placeholder:'Instrucciones para este ejercicio...',style:{width:'100%',padding:'6px 8px',borderRadius:7,border:'1.5px solid '+trainer.color,background:'#0d1b2a',fontSize:11,color:'#ffffff',caretColor:'#ffffff',boxSizing:'border-box',display:'block'}}),
+              React.createElement('div',{style:{display:'flex',gap:6,marginTop:5}},
+                React.createElement('button',{onClick:async()=>{await onSaveNote(ex.id,noteDraft);setNoteEditing(null);},style:{flex:1,padding:'6px',borderRadius:6,background:trainer.color,border:'none',color:'#fff',fontWeight:700,fontSize:11,cursor:'pointer'}},'Guardar nota'),
+                React.createElement('button',{onClick:()=>setNoteEditing(null),style:{padding:'6px 10px',borderRadius:6,background:'transparent',border:'1px solid #1e4a6a',color:'#7aadbe',fontSize:11,cursor:'pointer'}},'Cancelar')
+              )
+            ):
+            React.createElement('div',{style:{padding:'0 12px 8px',borderTop:'1px solid #1e3347',cursor:'pointer'},onClick:()=>{setNoteDraft(notes[ex.id]||'');setNoteEditing(ex.id);}},
+              notes[ex.id]?
+                React.createElement('div',null,
+                  React.createElement('div',{style:{fontSize:9,color:trainer.color,fontWeight:700,marginBottom:2}},'Nota (toca para editar):'),
+                  React.createElement('div',{style:{fontSize:11,color:'#e2f7fb'}},notes[ex.id])
+                ):
+                React.createElement('div',{style:{fontSize:10,color:trainer.color,fontWeight:600}},'+ Añadir nota')
+            )
+        )),
+        exercises.length>0&&React.createElement('button',{className:'btn btn-primary',onClick:onSave,style:{marginTop:8}},'Guardar rutina')
+      ),
+      tab==='add'&&React.createElement('div',null,
+        React.createElement('div',{className:'card',style:{border:'1.5px solid '+trainer.color+'55',marginBottom:12}},
+          React.createElement('div',{onClick:()=>setNewExOpen(!newExOpen),style:{display:'flex',justifyContent:'space-between',alignItems:'center',cursor:'pointer'}},
+            React.createElement('div',null,
+              React.createElement('div',{style:{fontSize:13,fontWeight:900,color:'#e2f7fb'}},'Crear ejercicio global'),
+              React.createElement('div',{style:{fontSize:11,color:'#7aadbe',marginTop:2}},'Quedará disponible en el catálogo global; no se asigna automáticamente')
+            ),
+            React.createElement('span',{style:{color:trainer.color,fontSize:18,fontWeight:900}},newExOpen?'−':'+')
+          ),
+          newExOpen&&React.createElement('div',{style:{marginTop:12,borderTop:'1px solid #1e3347',paddingTop:12}},
+            React.createElement('label',{className:'label'},'Nombre del ejercicio'),
+            React.createElement('input',{className:'inp',value:newExDraft.name,onChange:e=>setNewExDraft(d=>({...d,name:e.target.value})),placeholder:'Ej: Press Arnold unilateral',style:{marginBottom:10}}),
+            React.createElement('label',{className:'label'},'Categoría'),
+            React.createElement('select',{className:'inp',value:newExDraft.category,onChange:e=>setNewExDraft(d=>({...d,category:e.target.value})),style:{marginBottom:10}},
+              getCategoryOptions().map(cat=>React.createElement('option',{key:cat,value:cat},cat))
+            ),
+            React.createElement('label',{className:'label'},'Imagen'),
+            newExDraft.image&&React.createElement('img',{loading:'lazy',decoding:'async',src:newExDraft.image,style:{width:82,height:82,objectFit:'contain',borderRadius:12,background:'#0d1b2a',border:'1px solid #1e4a6a',marginBottom:8}}),
+            React.createElement('input',{className:'inp',value:newExDraft.image,onChange:e=>setNewExDraft(d=>({...d,image:e.target.value})),placeholder:'URL de imagen o sube un archivo',style:{marginBottom:6}}),
+            React.createElement('input',{type:'file',accept:'image/*',onChange:e=>handleNewExerciseImageFile(e.target.files&&e.target.files[0]),style:{fontSize:11,color:'#7aadbe',width:'100%',marginBottom:10}}),
+            React.createElement('label',{className:'label'},'Link de tutorial'),
+            React.createElement('input',{className:'inp',value:newExDraft.link,onChange:e=>setNewExDraft(d=>({...d,link:e.target.value})),placeholder:'https://...',style:{marginBottom:10}}),
+            React.createElement('label',{className:'label'},'Descripción opcional'),
+            React.createElement('textarea',{value:newExDraft.description,onChange:e=>setNewExDraft(d=>({...d,description:e.target.value})),rows:3,placeholder:'Indicaciones técnicas, postura, errores comunes...',style:{width:'100%',padding:'10px 12px',borderRadius:12,border:'1.5px solid #00bcd430',fontSize:13,color:'#e2f7fb',background:'#1a3347',outline:'none',boxSizing:'border-box',display:'block',marginBottom:12}}),
+            React.createElement('button',{className:'btn btn-primary',disabled:savingNewEx,onClick:createNewExercise},savingNewEx?'Creando...':'Crear ejercicio global')
+          )
+        ),
+        React.createElement('div',{style:{fontSize:10,fontWeight:900,color:'#7aadbe',letterSpacing:'.08em',margin:'6px 0 8px'}},'CATÁLOGO DE EJERCICIOS'),
+        Object.entries(CAT).filter(([,exsList])=>Array.isArray(exsList)).map(([cat,exsList])=>React.createElement('div',{key:cat+'-'+catalogVersion,style:{marginBottom:8}},
+          React.createElement('div',{onClick:()=>setOpenCat(openCat===cat?null:cat),style:{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'10px 12px',background:'#152535',borderRadius:10,border:'1.5px solid '+(openCat===cat?catColor(cat):'#1e4a6a'),cursor:'pointer',marginBottom:openCat===cat?0:0}},
+            React.createElement('div',{style:{display:'flex',alignItems:'center',gap:8}},
+              React.createElement('div',{style:{width:8,height:8,borderRadius:'50%',background:catColor(cat)}}),
+              React.createElement('span',{style:{fontWeight:700,fontSize:13,color:'#e2f7fb'}},cat)
+            ),
+            React.createElement('span',{style:{color:'#7aadbe',fontSize:12}},openCat===cat?'▲':exsList.length+' ▼')
+          ),
+          openCat===cat&&React.createElement('div',{style:{background:'#152535',borderRadius:10,border:'1px solid #1e4a6a',overflow:'hidden',marginTop:4}},
+            exsList.map(ex=>{
+              const inRtn=!!exercises.find(e=>e.id===ex.id);
+              return React.createElement('div',{key:ex.id,onClick:()=>addEx(ex),style:{display:'flex',alignItems:'center',gap:10,padding:'10px 12px',borderBottom:'1px solid #1e3a4a',cursor:'pointer',background:inRtn?catColor(cat)+'10':'transparent'}},
+                React.createElement('div',{style:{width:36,height:36,borderRadius:6,background:catColor(cat)+'22',border:'1px solid '+catColor(cat)+'33',overflow:'hidden',flexShrink:0,display:'flex',alignItems:'center',justifyContent:'center',fontSize:9,fontWeight:900,color:catColor(cat)}},
+                  getExerciseImage(ex)?React.createElement('img',{loading:'lazy',decoding:'async',src:getExerciseImage(ex),style:{width:'100%',height:'100%',objectFit:'contain'}}):React.createElement('img',{loading:'lazy',decoding:'async',src:IMG_PLACEHOLDER,style:{width:'100%',height:'100%',objectFit:'contain',opacity:0.4}})
+                ),
+                React.createElement('span',{style:{flex:1,fontSize:12,fontWeight:inRtn?700:500,color:inRtn?catColor(cat):'#e2f7fb'}},getExerciseName(ex,null)),
+                ex.custom&&React.createElement('span',{style:{fontSize:9,color:'#f59e0b',fontWeight:800,marginRight:4}},'NUEVO'),
+                React.createElement('button',{
+                  onClick:e=>{e.stopPropagation();deleteExerciseFromApp(ex);},
+                  disabled:deletingExId===ex.id,
+                  style:{padding:'4px 7px',borderRadius:6,border:'1px solid #ef444455',background:'#3d0d0d',color:'#ef4444',fontSize:10,fontWeight:800,cursor:'pointer'}
+                },deletingExId===ex.id?'...':'Borrar'),
+                React.createElement('span',{style:{color:inRtn?catColor(cat):'#00bcd4',fontWeight:700,fontSize:14}},inRtn?'✓':'+')
+              );
+            })
+          )
+        ))
+      )
+    )
+  );
+}
+
+// ─── RENDER ───────────────────────────────────────────────────────────────────
+(function bootJuandaFit(){
+  function showMissingDeps(){
+    document.body.style.cssText = 'background:#0d1b2a;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;font-family:sans-serif;';
+    document.body.innerHTML = '<div style="text-align:center;color:#e2f7fb;padding:32px;max-width:320px"><div style="font-size:48px;margin-bottom:16px">📡</div><div style="font-size:18px;font-weight:700;color:#00bcd4;margin-bottom:12px">No se pudo cargar JuandaFit</div><div style="font-size:13px;color:#a8cdd8;line-height:1.6">Verifica la conexión a internet y recarga la página.</div><button onclick="location.reload()" style="margin-top:20px;padding:12px 24px;border-radius:12px;border:none;background:#00bcd4;color:#fff;font-weight:700;font-size:14px;cursor:pointer">Reintentar</button></div>';
+  }
+
+  function start(){
+    if(typeof React === 'undefined' || typeof ReactDOM === 'undefined'){
+      showMissingDeps();
+      return;
+    }
+    // Primero pintar la app; luego precargar Firebase en segundo plano para que el login no se sienta lento.
+    var warmFirebase = function(){
+      ensureFirebaseReady().catch(function(e){
+        console.warn('Firebase background init deferred:', e);
+      });
+    };
+    if(window.requestIdleCallback){
+      requestIdleCallback(warmFirebase, {timeout: 1200});
+    }else{
+      setTimeout(warmFirebase, 900);
+    }
+    ({useState,useEffect,useRef,useCallback} = React);
+    const root=document.getElementById('root');
+    if(!root){ showMissingDeps(); return; }
+    root.innerHTML='';
+    ReactDOM.createRoot(root).render(React.createElement(ErrorBoundary,null,React.createElement(App)));
+  }
+
+  if(document.readyState === 'loading'){
+    window.addEventListener('DOMContentLoaded', start);
+  }else{
+    setTimeout(start,0);
+  }
+})();
+

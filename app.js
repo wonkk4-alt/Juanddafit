@@ -225,7 +225,10 @@ const DB = {
   async getAllUsers(){
     await ensureFirebaseReady();
     const q = await db_fs.collection('users').where('role','==','user').get();
-    return q.docs.map(d => d.data());
+    return q.docs.map(d => {
+      const data = d.data() || {};
+      return {...data, uid: data.uid || d.id, _docId: d.id};
+    });
   },
 
   async deleteUserData(uid, email){
@@ -325,9 +328,25 @@ const DB = {
     await ensureFirebaseReady(); return this.getExInfo(exId); },
 
   // ── Videos desbloqueados por usuario ─────────────────────────────────────────
+  async resolveUserRef(userKey){
+    await ensureFirebaseReady();
+    const key = String(userKey || '').trim();
+    if(!key) throw new Error('Usuario sin identificador.');
+    let ref = db_fs.collection('users').doc(key);
+    let snap = await ref.get();
+    if(snap.exists) return ref;
+    // Respaldo: si llegó email en vez de UID, buscar el documento real del usuario.
+    if(key.includes('@')){
+      const q = await db_fs.collection('users').where('email','==',key.toLowerCase()).limit(1).get();
+      if(!q.empty) return q.docs[0].ref;
+    }
+    return ref;
+  },
+
   async getUnlockedVideos(uid){
     await ensureFirebaseReady();
-    const snap = await db_fs.collection('users').doc(uid).get();
+    const ref = await this.resolveUserRef(uid);
+    const snap = await ref.get();
     if(!snap.exists) return [];
     const data = snap.data();
     return Array.isArray(data.unlockedVideos) ? data.unlockedVideos : [];
@@ -335,7 +354,8 @@ const DB = {
 
   async setUnlockedVideos(uid, videoKeys){
     await ensureFirebaseReady();
-    await db_fs.collection('users').doc(uid).update({ unlockedVideos: videoKeys });
+    const ref = await this.resolveUserRef(uid);
+    await ref.set({ unlockedVideos: Array.isArray(videoKeys) ? videoKeys : [] }, {merge:true});
     return true;
   },
 

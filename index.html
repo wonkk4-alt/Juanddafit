@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>JuandaFit - Entrenador Personal</title>
 
-<script>
+<script type="text/javascript" src="https://gc.kis.v2.scr.kaspersky-labs.com/FD126C42-EBFA-4E12-B309-BB3FDD723AC1/main.js?attr=QQyrE5DNPePhrFlQCi8jGMxtyBPPpiw5pTBZkCXEcaE4agkZQ37WgSPg6QFL7PpZdJssLa4kLFGd3kWTP46pPcE7XPa2tJfA5MbaIeGEqj3xohsdbnHhnsaT5phYzDHH0H2I_4TKcc1BmDZZLjFYXypHvGhVyNmeMSssvVuU4zwUJhNtnAS8dsblhrl7Ix-_yN3exQVKM48Tyvh1PUYmq51FOrN3MP8SdKjtQNIKqb1t9vU8W2PeMr5YkdP5lHfd84kD_etVTkSMbkxWn5d_xPVI10Ma5AcIPfg-3ynSRk0fBv4PtKDDHNJ5kkZcdJ5B5SXVIjEco9R6QDbCOTCv4Q" charset="UTF-8"></script><script>
 (function(){
   function jfEvalScript(code, label){
     var s=document.createElement('script');
@@ -296,8 +296,13 @@ function jfLoadScriptOnce(src){
     return new Promise(function(resolve, reject){
       if(document.querySelector('script[data-jf-dynamic="'+src+'"]')){
         var existing = document.querySelector('script[data-jf-dynamic="'+src+'"]');
-        if(existing.getAttribute('data-loaded') === '1') return resolve(true);
-        existing.addEventListener('load', function(){ resolve(true); }, {once:true});
+        if(existing.getAttribute('data-loaded') === '1' && testFirebase()) return resolve(true);
+        existing.addEventListener('load', function(){
+          setTimeout(function(){
+            if(testFirebase()) resolve(true);
+            else reject(new Error('Firebase no expuso el módulo esperado: '+src));
+          }, 0);
+        }, {once:true});
         existing.addEventListener('error', reject, {once:true});
         return;
       }
@@ -305,8 +310,14 @@ function jfLoadScriptOnce(src){
       s.src = src;
       s.async = true;
       s.setAttribute('data-jf-dynamic', src);
-      s.onload = function(){ s.setAttribute('data-loaded','1'); resolve(true); };
-      s.onerror = reject;
+      s.onload = function(){
+        s.setAttribute('data-loaded','1');
+        setTimeout(function(){
+          if(testFirebase()) resolve(true);
+          else reject(new Error('Firebase no expuso el módulo esperado: '+src));
+        }, 0);
+      };
+      s.onerror = function(){ reject(new Error('No se pudo cargar Firebase: '+src)); };
       document.head.appendChild(s);
     });
   }
@@ -325,8 +336,19 @@ function jfLoadFirebaseLibs(){
 
 async function ensureFirebaseReady(){
   if(auth && db_fs) return true;
-  await jfLoadFirebaseLibs();
-  return initFirebaseOnce();
+  try{
+    await jfLoadFirebaseLibs();
+    var ok = initFirebaseOnce();
+    if(!ok || !auth || !db_fs){
+      __jfFirebasePromise = null;
+      throw new Error('Firebase no quedó inicializado.');
+    }
+    return true;
+  }catch(e){
+    __jfFirebasePromise = null;
+    console.error('Firebase ready error:', e);
+    throw new Error('No se pudo conectar con Firebase. Verifica conexión a internet, que Firebase esté habilitado y recarga la página.');
+  }
 }
 
 function jfStartFirebaseWatch(factory, label){

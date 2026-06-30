@@ -125,6 +125,47 @@ async function ensureFirebaseReady(){
   }
 }
 
+
+function jfPad2(n){ return String(n).padStart(2,'0'); }
+function jfLocalDateKey(date){
+  var d = date || new Date();
+  return d.getFullYear() + '-' + jfPad2(d.getMonth()+1) + '-' + jfPad2(d.getDate());
+}
+function jfLocalMonthKey(date){
+  var d = date || new Date();
+  return d.getFullYear() + '-' + jfPad2(d.getMonth()+1);
+}
+function jfWeekStartDate(date){
+  var src = date || new Date();
+  var d = new Date(src.getFullYear(), src.getMonth(), src.getDate());
+  var day = d.getDay(); // 0=domingo, 1=lunes...
+  var diff = (day + 6) % 7; // semana inicia lunes
+  d.setDate(d.getDate() - diff);
+  d.setHours(0,0,0,0);
+  return d;
+}
+function jfCurrentWeekKey(date){
+  return 'week_' + jfLocalDateKey(jfWeekStartDate(date));
+}
+function jfIsCurrentWeekTimestamp(ts){
+  var n = Number(ts || 0);
+  if(!n) return false;
+  var start = jfWeekStartDate(new Date());
+  var end = new Date(start.getTime());
+  end.setDate(end.getDate() + 7);
+  return n >= start.getTime() && n < end.getTime();
+}
+function jfMergeCurrentWeekLegacyAttendance(target, source){
+  if(!source || typeof source !== 'object') return target;
+  Object.keys(source).forEach(function(day){
+    var val = source[day];
+    if(val && typeof val === 'object' && jfIsCurrentWeekTimestamp(val.t)){
+      target[day] = val;
+    }
+  });
+  return target;
+}
+
 function jfStartFirebaseWatch(factory, label){
   var stopped = false;
   var unsub = null;
@@ -178,6 +219,223 @@ function initFirebaseOnce(){
     console.error('Firebase init error:', e);
     return false;
   }
+}
+
+
+
+// ─── IMPORTACIÓN SIMPLE DE CLIENTES ──────────────────────────────────────────
+// Crea cuentas reales de Firebase Auth sin sacar al entrenador de su sesión,
+// usando una app secundaria solo para el registro masivo.
+function jfImportTrim(v){ return String(v==null?'':v).trim(); }
+function jfImportNormalizeKey(k){
+  return String(k||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9%]+/g,'').trim();
+}
+function jfImportFirst(row, keys){
+  for(var i=0;i<keys.length;i++){
+    var k=keys[i];
+    if(row && row[k]!==undefined && row[k]!==null && jfImportTrim(row[k])!=='') return jfImportTrim(row[k]);
+  }
+  return '';
+}
+function jfImportSplitObjectives(v){
+  var txt=jfImportTrim(v);
+  if(!txt) return [];
+  return txt.split(/[;,|]/).map(function(x){return jfImportTrim(x);}).filter(Boolean);
+}
+function jfImportAccessStatus(v){
+  var t=String(v||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim();
+  if(!t) return 'active';
+  if(['bloqueado','bloqueada','blocked','inactivo','suspendido','pausado','pendiente de pago','sin pago'].indexOf(t)>-1) return 'blocked';
+  return 'active';
+}
+function jfNormalizeImportedUser(row){
+  var normalized={};
+  Object.keys(row||{}).forEach(function(k){ normalized[jfImportNormalizeKey(k)] = row[k]; });
+  var email=jfImportFirst(normalized,['correo','email','correoelectronico','mail','e-mail']).toLowerCase();
+  var name=jfImportFirst(normalized,['nombre','nombrecompleto','cliente','usuario','name']);
+  var tel=jfImportFirst(normalized,['telefono','telefonoopcional','celular','whatsapp','tel','phone']);
+  var age=jfImportFirst(normalized,['edad','anos','age']);
+  var peso=jfImportFirst(normalized,['peso','pesokg','kg']);
+  var estatura=jfImportFirst(normalized,['estatura','estaturacm','altura','alturacm','cm']);
+  var grasaCorporal=jfImportFirst(normalized,['grasacorporal','grasacorporal%','%grasacorporal','porcentajegrasa','porcentajegrasacorporal']);
+  var masaMuscular=jfImportFirst(normalized,['masamuscular','masamuscular%','%masamuscular','porcentajemasa','porcentajemasamuscular']);
+  var grasaVisceral=jfImportFirst(normalized,['grasavisceral']);
+  var objetivo=jfImportFirst(normalized,['objetivo','objetivos','meta','metas']);
+  var frecuencia=jfImportFirst(normalized,['frecuencia','nivel','experiencia']);
+  var cond=jfImportFirst(normalized,['condicion','condicionmedica','observacion','observaciones','lesion','lesiones']);
+  var sex=jfImportFirst(normalized,['sexo','sex','genero']);
+  var accessStatus=jfImportAccessStatus(jfImportFirst(normalized,['estadoacceso','estado','acceso','estatus']));
+  var accessReason=jfImportFirst(normalized,['motivoacceso','razonbloqueo','mensaje','observacionacceso']);
+  return {email:email,name:name,tel:tel,age:age,edad:age,peso:peso,estatura:estatura,grasaCorporal:grasaCorporal,masaMuscular:masaMuscular,grasaVisceral:grasaVisceral,objetivo:jfImportSplitObjectives(objetivo),frecuencia:frecuencia,cond:cond,sex:sex,accessStatus:accessStatus,accessBlocked:accessStatus==='blocked',accessReason:accessReason};
+}
+function jfImportedUserErrors(profile){
+  var errs=[];
+  if(!profile.name) errs.push('Falta nombre');
+  if(!profile.email) errs.push('Falta correo');
+  else if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(profile.email)) errs.push('Correo inválido');
+  return errs;
+}
+function jfBuildImportedUserDoc(uid, profile, tempPassword, trainer){
+  var hasProfileData = !!(profile.age||profile.peso||profile.estatura||profile.grasaCorporal||profile.masaMuscular||profile.grasaVisceral||profile.cond||profile.frecuencia||(profile.objetivo&&profile.objetivo.length));
+  return {
+    uid: uid,
+    email: profile.email,
+    name: profile.name,
+    tel: profile.tel||'',
+    role: 'user',
+    accessStatus: profile.accessStatus||'active',
+    accessBlocked: !!profile.accessBlocked,
+    accessReason: profile.accessReason||'',
+    profileStatus: hasProfileData ? 'active' : 'pending',
+    objetivo: profile.objetivo||[],
+    frecuencia: profile.frecuencia||'',
+    peso: profile.peso||'',
+    estatura: profile.estatura||'',
+    imc: '',
+    grasaVisceral: profile.grasaVisceral||'',
+    grasaCorporal: profile.grasaCorporal||'',
+    masaMuscular: profile.masaMuscular||'',
+    edad: profile.edad||'',
+    age: profile.age||profile.edad||'',
+    cond: profile.cond||'',
+    condicion: profile.cond||'',
+    sex: profile.sex||'',
+    unlockedVideos: [],
+    mustChangePassword: true,
+    temporaryPassword: true,
+    temporaryPasswordHint: tempPassword,
+    importedAt: Date.now(),
+    importedBy: (trainer&&trainer.uid)||(trainer&&trainer.email)||'',
+    createdAt: Date.now()
+  };
+}
+function jfExistingUserUpdate(profile, trainer){
+  var data={
+    name: profile.name,
+    tel: profile.tel||'',
+    accessStatus: profile.accessStatus||'active',
+    accessBlocked: !!profile.accessBlocked,
+    accessReason: profile.accessReason||'',
+    objetivo: profile.objetivo||[],
+    frecuencia: profile.frecuencia||'',
+    peso: profile.peso||'',
+    estatura: profile.estatura||'',
+    grasaVisceral: profile.grasaVisceral||'',
+    grasaCorporal: profile.grasaCorporal||'',
+    masaMuscular: profile.masaMuscular||'',
+    edad: profile.edad||'',
+    age: profile.age||profile.edad||'',
+    cond: profile.cond||'',
+    condicion: profile.cond||'',
+    sex: profile.sex||'',
+    updatedAt: Date.now(),
+    updatedBy: (trainer&&trainer.uid)||(trainer&&trainer.email)||''
+  };
+  Object.keys(data).forEach(function(k){ if(data[k]==='' || data[k]===null || data[k]===undefined || (Array.isArray(data[k])&&data[k].length===0)) delete data[k]; });
+  return data;
+}
+function jfCreateSecondaryAuth(){
+  var appName='jf_import_'+Date.now()+'_'+Math.random().toString(36).slice(2);
+  var secondaryApp=firebase.initializeApp(firebaseConfig, appName);
+  var secondaryAuth=secondaryApp.auth();
+  return {app:secondaryApp, auth:secondaryAuth};
+}
+function jfFriendlyAuthError(e){
+  var code=e&&e.code;
+  if(code==='auth/email-already-in-use') return 'Ese correo ya existe en Firebase Auth.';
+  if(code==='auth/invalid-email') return 'Correo inválido.';
+  if(code==='auth/weak-password') return 'La contraseña temporal debe tener mínimo 6 caracteres.';
+  if(code==='auth/network-request-failed') return 'Fallo de conexión. Revisa internet e intenta de nuevo.';
+  return (e&&e.message)||'No se pudo crear la cuenta.';
+}
+function jfReadFileAsText(file){
+  return new Promise(function(resolve,reject){
+    var r=new FileReader();
+    r.onload=function(){resolve(String(r.result||''));};
+    r.onerror=function(){reject(new Error('No se pudo leer el archivo.'));};
+    r.readAsText(file,'utf-8');
+  });
+}
+function jfReadFileAsArrayBuffer(file){
+  return new Promise(function(resolve,reject){
+    var r=new FileReader();
+    r.onload=function(){resolve(r.result);};
+    r.onerror=function(){reject(new Error('No se pudo leer el archivo.'));};
+    r.readAsArrayBuffer(file);
+  });
+}
+function jfParseDelimitedText(text, delimiter){
+  var rows=[], row=[], cur='', quoted=false;
+  text=String(text||'').replace(/^\uFEFF/,'');
+  for(var i=0;i<text.length;i++){
+    var ch=text[i], next=text[i+1];
+    if(ch==='"'){
+      if(quoted && next==='"'){ cur+='"'; i++; }
+      else quoted=!quoted;
+    }else if(ch===delimiter && !quoted){ row.push(cur); cur=''; }
+    else if((ch==='\n' || ch==='\r') && !quoted){
+      if(ch==='\r' && next==='\n') i++;
+      row.push(cur); cur='';
+      if(row.some(function(x){return String(x).trim()!=='';})) rows.push(row);
+      row=[];
+    }else cur+=ch;
+  }
+  row.push(cur);
+  if(row.some(function(x){return String(x).trim()!=='';})) rows.push(row);
+  return rows;
+}
+function jfParseCsvObjects(text){
+  var first=String(text||'').split(/\r?\n/).find(function(l){return l.trim();})||'';
+  var delimiter=(first.split(';').length>first.split(',').length)?';':',';
+  var rows=jfParseDelimitedText(text, delimiter);
+  if(!rows.length) return [];
+  var headers=rows[0].map(function(h){return jfImportTrim(h);});
+  return rows.slice(1).map(function(r){
+    var obj={};
+    headers.forEach(function(h,i){ if(h) obj[h]=jfImportTrim(r[i]); });
+    return obj;
+  }).filter(function(o){ return Object.keys(o).some(function(k){return jfImportTrim(o[k])!=='';}); });
+}
+var __jfXlsxPromise=null;
+function jfLoadXlsxLib(){
+  if(window.XLSX) return Promise.resolve(window.XLSX);
+  if(__jfXlsxPromise) return __jfXlsxPromise;
+  __jfXlsxPromise = new Promise(function(resolve,reject){
+    var src='https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js';
+    var existing=document.querySelector('script[data-jf-xlsx="1"]');
+    if(existing){ existing.addEventListener('load',function(){resolve(window.XLSX);},{once:true}); existing.addEventListener('error',reject,{once:true}); return; }
+    var s=document.createElement('script');
+    s.src=src; s.async=true; s.crossOrigin='anonymous'; s.setAttribute('data-jf-xlsx','1');
+    s.onload=function(){ window.XLSX?resolve(window.XLSX):reject(new Error('No se pudo activar el lector de Excel.')); };
+    s.onerror=function(){ reject(new Error('No se pudo cargar el lector de Excel. Intenta con CSV.')); };
+    document.head.appendChild(s);
+  });
+  return __jfXlsxPromise;
+}
+async function jfParseImportFile(file){
+  if(!file) return [];
+  var name=String(file.name||'').toLowerCase();
+  if(name.endsWith('.csv') || name.endsWith('.txt')) return jfParseCsvObjects(await jfReadFileAsText(file));
+  if(name.endsWith('.xlsx') || name.endsWith('.xls')){
+    var XLSX = await jfLoadXlsxLib();
+    var buf = await jfReadFileAsArrayBuffer(file);
+    var wb = XLSX.read(buf,{type:'array'});
+    var first = wb.SheetNames[0];
+    if(!first) return [];
+    return XLSX.utils.sheet_to_json(wb.Sheets[first],{defval:''});
+  }
+  throw new Error('Formato no compatible. Usa Excel (.xlsx) o CSV.');
+}
+function jfDownloadImportTemplate(){
+  var headers=['nombre','correo','telefono','edad','peso','estatura','grasa_corporal','masa_muscular','grasa_visceral','objetivo','frecuencia','condicion','estado_acceso'];
+  var sample=['Juan Perez','juan.perez@correo.com','3000000000','28','75','175','18','42','8','Hipertrofia; Fuerza general','Regular','Sin lesiones','active'];
+  var csv='\uFEFF'+headers.join(';')+'\n'+sample.map(function(v){return '"'+String(v).replace(/"/g,'""')+'"';}).join(';')+'\n';
+  var blob=new Blob([csv],{type:'text/csv;charset=utf-8'});
+  var a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download='plantilla_clientes_juandafit.csv';
+  document.body.appendChild(a); a.click();
+  setTimeout(function(){URL.revokeObjectURL(a.href);a.remove();},0);
 }
 
 // ─── DB (Firebase) ────────────────────────────────────────────────────────────
@@ -238,7 +496,9 @@ const DB = {
     await ensureFirebaseReady();
     const q = await db_fs.collection('users').where('email','==',email.trim().toLowerCase()).limit(1).get();
     if(q.empty) return null;
-    return q.docs[0].data();
+    const d = q.docs[0];
+    const data = d.data() || {};
+    return {...data, uid: data.uid || d.id, _docId: d.id};
   },
 
   async saveUserProfile(uid, data){
@@ -699,13 +959,13 @@ const DB = {
   // ── Asistencia ────────────────────────────────────────────────────────────────
   async setAtt(uid, day, status){
     await ensureFirebaseReady();
-    const week = new Date().toISOString().slice(0,7);
-    // Guardar como objeto anidado real: { "2026-06": { lun: {...} } }
-    // Antes se usaba una clave con punto (`2026-06.lun`), pero getWeekAtt
-    // lee datos anidados; por eso el día no quedaba verde aunque se guardara.
+    const week = jfCurrentWeekKey();
+    const now = Date.now();
+    // Semana real: la clave cambia cada lunes, no cada mes.
+    // Ejemplo: { "week_2026-06-29": { lun: {...}, mar: {...} } }
     await db_fs.collection('attendance').doc(uid).set({
       [week]: {
-        [day]: {s: status, t: Date.now()}
+        [day]: {s: status, t: now, weekKey: week, weekStart: week.replace('week_','')}
       }
     }, {merge: true});
     return true;
@@ -713,19 +973,25 @@ const DB = {
 
   async getWeekAtt(uid){
     await ensureFirebaseReady();
-    const week = new Date().toISOString().slice(0,7);
+    const week = jfCurrentWeekKey();
+    const month = jfLocalMonthKey();
     const snap = await db_fs.collection('attendance').doc(uid).get();
     if(!snap.exists) return {};
     const data = snap.data() || {};
-    const nested = data[week] || {};
-    // Compatibilidad con registros viejos guardados como "2026-06.lun".
+    const current = data[week] || {};
+
+    // Compatibilidad con registros viejos guardados por mes: "2026-06" o "2026-06.lun".
+    // Solo se traen si su timestamp pertenece a la semana actual, para evitar datos falsos.
     const legacy = {};
+    jfMergeCurrentWeekLegacyAttendance(legacy, data[month] || {});
     Object.keys(data).forEach(k=>{
-      if(k.indexOf(week+'.')===0){
-        legacy[k.slice(week.length+1)] = data[k];
+      if(k.indexOf(month+'.')===0){
+        const day = k.slice(month.length+1);
+        const val = data[k];
+        if(val && jfIsCurrentWeekTimestamp(val.t)) legacy[day] = val;
       }
     });
-    return Object.assign({}, legacy, nested);
+    return Object.assign({}, legacy, current);
   },
 
   // ── Logs de ejercicio ─────────────────────────────────────────────────────────
@@ -749,6 +1015,72 @@ const DB = {
         [exId]: data
       }
     }, {merge: true});
+    return true;
+  },
+
+
+  // ── Importación masiva de clientes ─────────────────────────────────────────
+  async createImportedUser(row, tempPassword, trainer, options){
+    await ensureFirebaseReady();
+    await jfEnsureAuthPersistence();
+    options = options || {};
+    tempPassword = String(tempPassword || '123456');
+    if(tempPassword.length < 6) throw new Error('La contraseña temporal debe tener mínimo 6 caracteres. Usa 123456 o una clave similar.');
+
+    const profile = jfNormalizeImportedUser(row || {});
+    const errors = jfImportedUserErrors(profile);
+    if(errors.length) throw new Error(errors.join(', '));
+
+    let existing = null;
+    try{ existing = await this.getUserByEmail(profile.email); }catch(e){}
+    if(existing && (existing.uid || existing.email)){
+      const docId = existing.uid || existing.email;
+      if(options.updateExisting !== false){
+        await db_fs.collection('users').doc(docId).set(jfExistingUserUpdate(profile, trainer), {merge:true});
+        return {status:'updated', uid:docId, email:profile.email, name:profile.name, message:'Ya existía; datos actualizados'};
+      }
+      return {status:'exists', uid:docId, email:profile.email, name:profile.name, message:'Ya existía; no se cambió'};
+    }
+
+    let secondary = null;
+    let uid = null;
+    let createdUser = null;
+    let authCreated = false;
+    try{
+      secondary = jfCreateSecondaryAuth();
+      try{ await secondary.auth.setPersistence(firebase.auth.Auth.Persistence.NONE); }catch(e){}
+      const cred = await secondary.auth.createUserWithEmailAndPassword(profile.email, tempPassword);
+      createdUser = cred.user;
+      uid = createdUser.uid;
+      authCreated = true;
+      const doc = jfBuildImportedUserDoc(uid, profile, tempPassword, trainer);
+      await db_fs.collection('users').doc(uid).set(doc, {merge:true});
+      return {status:'created', uid:uid, email:profile.email, name:profile.name, message:'Cuenta creada'};
+    }catch(e){
+      if(authCreated && createdUser){
+        try{ await createdUser.delete(); }catch(delErr){ console.warn('No se pudo revertir cuenta importada sin perfil:', delErr); }
+      }
+      if(authCreated){ throw new Error('Se creó la cuenta, pero no se pudo guardar el perfil en Firestore. Revisa reglas/permisos e intenta de nuevo.'); }
+      throw new Error(jfFriendlyAuthError(e));
+    }finally{
+      if(secondary && secondary.auth){ try{ await secondary.auth.signOut(); }catch(e){} }
+      if(secondary && secondary.app){ try{ await secondary.app.delete(); }catch(e){} }
+    }
+  },
+
+  async changeOwnTemporaryPassword(uid, newPassword){
+    await ensureFirebaseReady();
+    await jfEnsureAuthPersistence();
+    newPassword = String(newPassword || '');
+    if(newPassword.length < 6) throw new Error('La nueva contraseña debe tener mínimo 6 caracteres.');
+    if(!auth.currentUser) throw new Error('No hay una sesión activa. Vuelve a iniciar sesión.');
+    await auth.currentUser.updatePassword(newPassword);
+    await db_fs.collection('users').doc(uid).set({
+      mustChangePassword:false,
+      temporaryPassword:false,
+      temporaryPasswordHint:'',
+      passwordChangedAt:Date.now()
+    }, {merge:true});
     return true;
   },
 
@@ -1424,6 +1756,7 @@ function App(){
   }
 
   if(efectiveScr==='splash') return React.createElement(Splash);
+  if(user && user.mustChangePassword) return React.createElement(ForcePasswordChangeScreen,{user,onDone:(updated)=>setUser(updated),onLogout:logout});
   if(efectiveScr==='trainer') return React.createElement(TrainerPanel,{trainer,onLogout:logout});
   if(efectiveScr==='home')    return React.createElement(HomeScreen,{user,onLogout:logout,updateUser:setUser});
   if(efectiveScr==='login')   return React.createElement(LoginScreen,{onBack:()=>_setNavScr(null),onLogin:(tr,u)=>{if(tr){setTrainer(tr);setUser(null);}else{setUser(u);setTrainer(null);}}});
@@ -1437,6 +1770,66 @@ function Splash(){
   return React.createElement('div',{style:{height:'100vh',background:'#152535',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:20}},
     React.createElement('img',{loading:'lazy',decoding:'async',src:LOGO_SRC,style:{width:180,animation:'fadeIn .8s ease'}}),
     React.createElement('div',{className:'spin',style:{marginTop:10}})
+  );
+}
+
+
+
+// ─── CAMBIO OBLIGATORIO DE CONTRASEÑA TEMPORAL ──────────────────────────────
+function ForcePasswordChangeScreen({user,onDone,onLogout}){
+  const [pw1,setPw1]=useState('');
+  const [pw2,setPw2]=useState('');
+  const [err,setErr]=useState('');
+  const [loading,setLoading]=useState(false);
+  const tempHint = user.temporaryPasswordHint || '123456';
+
+  async function save(){
+    setErr('');
+    if(!pw1 || !pw2){ setErr('Escribe y confirma tu nueva contraseña.'); return; }
+    if(pw1.length<6){ setErr('La nueva contraseña debe tener mínimo 6 caracteres.'); return; }
+    if(pw1!==pw2){ setErr('Las contraseñas no coinciden.'); return; }
+    if(pw1===tempHint){ setErr('La nueva contraseña debe ser diferente a la temporal.'); return; }
+    setLoading(true);
+    try{
+      await DB.changeOwnTemporaryPassword(user.uid, pw1);
+      const updated={...user,mustChangePassword:false,temporaryPassword:false,temporaryPasswordHint:''};
+      if(onDone) onDone(updated);
+    }catch(e){
+      setErr(e.message||'No se pudo cambiar la contraseña.');
+      setLoading(false);
+    }
+  }
+
+  return React.createElement('div',{className:'scr',style:{background:'#0d1b2a'}},
+    React.createElement('div',{className:'wfc-top'},React.createElement('div',{className:'wfc-top-txt'},'JuandaFit')),
+    React.createElement('div',{className:'scrollable',style:{padding:24,display:'flex',alignItems:'center',justifyContent:'center'}},
+      React.createElement('div',{className:'card',style:{width:'100%',maxWidth:380,border:'1.5px solid #00bcd455',boxShadow:'0 18px 60px #00000035'}},
+        React.createElement('div',{style:{textAlign:'center',marginBottom:18}},
+          React.createElement('img',{loading:'lazy',decoding:'async',src:LOGO_SRC,style:{width:90,margin:'0 auto 14px',display:'block'}}),
+          React.createElement('div',{style:{fontSize:20,fontWeight:900,color:'#e2f7fb',marginBottom:6}},'Crea tu contraseña'),
+          React.createElement('div',{style:{fontSize:12,color:'#a8cdd8',lineHeight:1.5}},
+            'Entraste con una contraseña temporal. Para proteger tu cuenta, define una contraseña nueva antes de continuar.'
+          )
+        ),
+        React.createElement('div',{style:{background:'#0d2030',border:'1px solid #00bcd430',borderRadius:12,padding:12,marginBottom:14,fontSize:12,color:'#7aadbe',lineHeight:1.5}},
+          'Tu correo: ',React.createElement('b',{style:{color:'#e2f7fb'}},user.email||''),
+          React.createElement('br'),
+          'Contraseña temporal usada: ',React.createElement('b',{style:{color:'#00e5ff'}},tempHint)
+        ),
+        React.createElement('div',{style:{marginBottom:12}},
+          React.createElement('label',{className:'label'},'NUEVA CONTRASEÑA'),
+          React.createElement('input',{className:'inp',type:'password',value:pw1,onChange:e=>setPw1(e.target.value),placeholder:'Mínimo 6 caracteres'})
+        ),
+        React.createElement('div',{style:{marginBottom:12}},
+          React.createElement('label',{className:'label'},'CONFIRMAR CONTRASEÑA'),
+          React.createElement('input',{className:'inp',type:'password',value:pw2,onChange:e=>setPw2(e.target.value),placeholder:'Repite tu nueva contraseña',onKeyDown:e=>{if(e.key==='Enter')save();}})
+        ),
+        err&&React.createElement('div',{className:'err',style:{marginBottom:12}},err),
+        loading?React.createElement('div',{style:{textAlign:'center',padding:12}},React.createElement('div',{className:'spin'})):
+          React.createElement('button',{className:'btn btn-primary',onClick:save},'Guardar y entrar'),
+        React.createElement('button',{className:'btn btn-secondary',onClick:onLogout,style:{marginTop:10}},'Salir')
+      )
+    )
   );
 }
 
@@ -2519,6 +2912,147 @@ function UserCard({u, onSelect, onDelete, deleting}){
   );
 }
 
+
+
+// ─── IMPORTAR CLIENTES (ENTRENADOR) ──────────────────────────────────────────
+function ImportUsersScreen({trainer,onBack}){
+  const [fileName,setFileName]=useState('');
+  const [rows,setRows]=useState([]);
+  const [err,setErr]=useState('');
+  const [loading,setLoading]=useState(false);
+  const [importing,setImporting]=useState(false);
+  const [tempPassword,setTempPassword]=useState('123456');
+  const [results,setResults]=useState([]);
+  const [progress,setProgress]=useState({done:0,total:0});
+
+  async function handleFile(e){
+    const file=e.target.files&&e.target.files[0];
+    setErr(''); setResults([]); setRows([]); setFileName(file?file.name:'');
+    if(!file)return;
+    setLoading(true);
+    try{
+      const rawRows=await jfParseImportFile(file);
+      const prepared=rawRows.map(function(raw,i){
+        const profile=jfNormalizeImportedUser(raw);
+        const errors=jfImportedUserErrors(profile);
+        return {line:i+2,raw:raw,profile:profile,errors:errors};
+      }).filter(function(r){return r.profile.email||r.profile.name||Object.keys(r.raw||{}).length;});
+      if(!prepared.length) throw new Error('No encontré clientes en el archivo. Revisa que la primera fila tenga encabezados.');
+      setRows(prepared);
+    }catch(ex){
+      setErr(ex.message||'No pude leer el archivo.');
+    }
+    setLoading(false);
+  }
+
+  async function startImport(){
+    const pass=String(tempPassword||'');
+    if(pass.length<6){ setErr('La contraseña temporal debe tener mínimo 6 caracteres. Usa 123456.'); return; }
+    const valid=rows.filter(r=>!r.errors.length);
+    if(!valid.length){ setErr('No hay filas válidas para importar.'); return; }
+    const ok=window.confirm('Se crearán '+valid.length+' cuenta(s) reales en JuandaFit.\n\nCorreo: el del Excel/CSV\nContraseña temporal: '+pass+'\n\nAl entrar, cada cliente tendrá que crear su nueva contraseña.');
+    if(!ok)return;
+    setErr(''); setImporting(true); setResults([]); setProgress({done:0,total:valid.length});
+    const out=[];
+    for(let i=0;i<valid.length;i++){
+      const item=valid[i];
+      try{
+        const res=await DB.createImportedUser(item.raw, pass, trainer, {updateExisting:true});
+        out.push({line:item.line,name:item.profile.name,email:item.profile.email,status:res.status,message:res.message||'Listo'});
+      }catch(ex){
+        out.push({line:item.line,name:item.profile.name,email:item.profile.email,status:'error',message:ex.message||'Error'});
+      }
+      setProgress({done:i+1,total:valid.length});
+      setResults(out.slice());
+    }
+    setImporting(false);
+  }
+
+  const validCount=rows.filter(r=>!r.errors.length).length;
+  const errorCount=rows.length-validCount;
+  const created=results.filter(r=>r.status==='created').length;
+  const updated=results.filter(r=>r.status==='updated').length;
+  const failed=results.filter(r=>r.status==='error').length;
+
+  return React.createElement('div',{className:'scr'},
+    React.createElement('div',{className:'wfc-top'},React.createElement('div',{className:'wfc-top-txt'},'JuandaFit')),
+    React.createElement('div',{className:'hdr'},
+      React.createElement('button',{className:'hdr-back',onClick:onBack},'Volver'),
+      React.createElement('div',{className:'hdr-title'},'IMPORTAR CLIENTES')
+    ),
+    React.createElement('div',{className:'scrollable',style:{padding:14,background:'#0d1b2a'}},
+      React.createElement('div',{className:'card',style:{border:'1.5px solid #00bcd455'}},
+        React.createElement('div',{style:{fontSize:20,fontWeight:900,color:'#e2f7fb',marginBottom:6}},'Crear cuentas desde Excel o CSV'),
+        React.createElement('div',{style:{fontSize:12,color:'#a8cdd8',lineHeight:1.6,marginBottom:14}},
+          'Sube una lista de clientes y la app crea las cuentas reales con correo y contraseña temporal. Después, cuando el cliente entre, la app le pedirá crear su propia contraseña.'
+        ),
+        React.createElement('div',{style:{background:'#0d2030',border:'1px solid #00bcd430',borderRadius:12,padding:12,marginBottom:14,fontSize:12,color:'#7aadbe',lineHeight:1.55}},
+          React.createElement('b',{style:{color:'#00e5ff'}},'Flujo recomendado: '),
+          'Juanda descarga la plantilla, llena nombre y correo, sube el archivo, revisa la vista previa y toca “Crear cuentas”.'
+        ),
+        React.createElement('div',{style:{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:12}},
+          React.createElement('button',{className:'btn btn-secondary',onClick:jfDownloadImportTemplate,style:{fontSize:13,padding:11}},'Descargar plantilla'),
+          React.createElement('label',{className:'btn btn-primary',style:{fontSize:13,padding:11,textAlign:'center',display:'block',cursor:'pointer'}},
+            'Subir archivo',
+            React.createElement('input',{type:'file',accept:'.csv,.xlsx,.xls',onChange:handleFile,style:{display:'none'}})
+          )
+        ),
+        fileName&&React.createElement('div',{style:{fontSize:11,color:'#a8cdd8',marginBottom:10}},'Archivo: ',React.createElement('b',{style:{color:'#e2f7fb'}},fileName)),
+        React.createElement('div',{style:{marginBottom:8}},
+          React.createElement('label',{className:'label'},'CONTRASEÑA TEMPORAL'),
+          React.createElement('input',{className:'inp',value:tempPassword,onChange:e=>setTempPassword(e.target.value),placeholder:'123456',style:{fontSize:18,fontWeight:900,textAlign:'center',letterSpacing:'.08em'}}),
+          React.createElement('div',{style:{fontSize:11,color:'#7aadbe',lineHeight:1.45,marginTop:6}},
+            'Usamos 123456 porque Firebase exige mínimo 6 caracteres. Puede cambiarse por otra clave temporal sencilla.'
+          )
+        ),
+        err&&React.createElement('div',{className:'err',style:{marginBottom:10}},err),
+        loading&&React.createElement('div',{style:{textAlign:'center',padding:16}},React.createElement('div',{className:'spin'}))
+      ),
+
+      rows.length>0&&React.createElement('div',{className:'card'},
+        React.createElement('div',{style:{display:'flex',justifyContent:'space-between',gap:8,alignItems:'center',marginBottom:10}},
+          React.createElement('div',{style:{fontSize:13,fontWeight:900,color:'#e2f7fb'}},'Vista previa'),
+          React.createElement('div',{style:{fontSize:11,color:'#a8cdd8'}},validCount+' válidas · '+errorCount+' con error')
+        ),
+        React.createElement('div',{style:{display:'grid',gridTemplateColumns:'1fr 1fr 90px',gap:6,fontSize:10,color:'#7aadbe',fontWeight:900,padding:'0 2px 6px'}},
+          React.createElement('div',null,'NOMBRE'),React.createElement('div',null,'CORREO'),React.createElement('div',null,'ESTADO')
+        ),
+        rows.slice(0,10).map(r=>React.createElement('div',{key:r.line,style:{display:'grid',gridTemplateColumns:'1fr 1fr 90px',gap:6,alignItems:'center',padding:'8px 2px',borderTop:'1px solid #1e3347'}},
+          React.createElement('div',{style:{fontSize:12,color:'#e2f7fb',fontWeight:700,overflow:'hidden',textOverflow:'ellipsis'}},r.profile.name||'—'),
+          React.createElement('div',{style:{fontSize:11,color:'#a8cdd8',overflow:'hidden',textOverflow:'ellipsis'}},r.profile.email||'—'),
+          React.createElement('div',{style:{fontSize:10,fontWeight:900,color:r.errors.length?'#fca5a5':'#86efac'}},r.errors.length?'ERROR':'OK')
+        )),
+        rows.length>10&&React.createElement('div',{style:{fontSize:11,color:'#7aadbe',marginTop:8}},'Mostrando 10 de '+rows.length+' filas.'),
+        errorCount>0&&React.createElement('div',{style:{background:'#2a1111',border:'1px solid #ef444455',borderRadius:10,padding:10,marginTop:12,fontSize:11,color:'#fca5a5',lineHeight:1.5}},
+          rows.filter(r=>r.errors.length).slice(0,4).map(r=>'Fila '+r.line+': '+r.errors.join(', ')).join(' · ')
+        ),
+        React.createElement('div',{style:{background:'#0d2030',border:'1px solid #00bcd430',borderRadius:10,padding:10,marginTop:12,fontSize:11,color:'#7aadbe',lineHeight:1.5}},
+          'Si un correo ya existe en la base de datos, se actualizan sus datos de perfil, pero no se cambia su contraseña.'
+        ),
+        importing?React.createElement('div',{style:{textAlign:'center',padding:14}},
+          React.createElement('div',{className:'spin'}),
+          React.createElement('div',{style:{fontSize:12,color:'#a8cdd8',marginTop:8}},'Creando cuentas '+progress.done+' / '+progress.total)
+        ):
+        React.createElement('button',{className:'btn btn-primary',onClick:startImport,disabled:validCount===0,style:{marginTop:14,opacity:validCount===0?.5:1}},'Crear '+validCount+' cuenta(s)')
+      ),
+
+      results.length>0&&React.createElement('div',{className:'card'},
+        React.createElement('div',{style:{fontSize:13,fontWeight:900,color:'#e2f7fb',marginBottom:10}},'Resultado'),
+        React.createElement('div',{style:{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8,marginBottom:12}},
+          React.createElement('div',{style:{textAlign:'center',background:'#16a34a15',border:'1px solid #16a34a30',borderRadius:10,padding:10}},React.createElement('div',{style:{fontSize:22,fontWeight:900,color:'#16a34a'}},created),React.createElement('div',{style:{fontSize:10,color:'#a8cdd8'}},'Creadas')),
+          React.createElement('div',{style:{textAlign:'center',background:'#00bcd415',border:'1px solid #00bcd430',borderRadius:10,padding:10}},React.createElement('div',{style:{fontSize:22,fontWeight:900,color:'#00bcd4'}},updated),React.createElement('div',{style:{fontSize:10,color:'#a8cdd8'}},'Actualizadas')),
+          React.createElement('div',{style:{textAlign:'center',background:'#ef444415',border:'1px solid #ef444430',borderRadius:10,padding:10}},React.createElement('div',{style:{fontSize:22,fontWeight:900,color:'#ef4444'}},failed),React.createElement('div',{style:{fontSize:10,color:'#a8cdd8'}},'Fallidas'))
+        ),
+        results.slice(0,20).map((r,i)=>React.createElement('div',{key:i,style:{padding:'8px 0',borderTop:'1px solid #1e3347',fontSize:11,color:r.status==='error'?'#fca5a5':'#a8cdd8'}},
+          React.createElement('b',{style:{color:r.status==='error'?'#fca5a5':'#e2f7fb'}},r.email||r.name||('Fila '+r.line)),
+          ' — ',r.message
+        )),
+        results.length>20&&React.createElement('div',{style:{fontSize:11,color:'#7aadbe',marginTop:8}},'Mostrando 20 de '+results.length+' resultados.')
+      )
+    )
+  );
+}
+
 function TrainerPanel({trainer,onLogout}){
   const [users,setUsers]=useState([]);
   const [helpReqs,setHelpReqs]=useState([]);
@@ -2572,6 +3106,7 @@ function TrainerPanel({trainer,onLogout}){
   }
 
   if(view==='ficha'&&selUser) return React.createElement(UserFicha,{user:selUser,trainer,onBack:()=>{setView('list');setSelUser(null);}});
+  if(view==='import_users') return React.createElement(ImportUsersScreen,{trainer,onBack:()=>setView('list')});
 
   const filtered=search?users.filter(u=>u.name&&u.name.toLowerCase().includes(search.toLowerCase())):users;
 
@@ -2631,6 +3166,18 @@ function TrainerPanel({trainer,onLogout}){
             )
           );
         })
+      ),
+
+      // ── Importación de clientes ──
+      React.createElement('div',{className:'card',style:{border:'1.5px solid #00bcd455',marginBottom:12}},
+        React.createElement('div',{style:{display:'flex',gap:12,alignItems:'center'}},
+          React.createElement('div',{style:{width:46,height:46,borderRadius:14,background:'#00bcd420',display:'flex',alignItems:'center',justifyContent:'center',fontSize:22,flexShrink:0}},'📥'),
+          React.createElement('div',{style:{flex:1}},
+            React.createElement('div',{style:{fontSize:14,fontWeight:900,color:'#e2f7fb'}},'Importar clientes'),
+            React.createElement('div',{style:{fontSize:11,color:'#a8cdd8',lineHeight:1.4}},'Crea cuentas reales desde Excel/CSV con contraseña temporal.')
+          ),
+          React.createElement('button',{onClick:()=>setView('import_users'),style:{padding:'9px 12px',borderRadius:10,border:'none',background:'#00bcd4',color:'#fff',fontWeight:800,fontSize:11,cursor:'pointer'}},'Abrir')
+        )
       ),
 
       // ── Buscador ──

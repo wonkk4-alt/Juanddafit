@@ -1,4 +1,4 @@
-const CACHE='juandafit-fast-simple-v5-unlock-doc-fix';
+const CACHE='juandafit-v6-categorias-sesion';
 const CORE=['./index.html','./app.js','./ex-imgs.json','./logo.webp','https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js','https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js','https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js','https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js','https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js'];
 self.addEventListener('install',e=>{self.skipWaiting();e.waitUntil(caches.open(CACHE).then(c=>c.addAll(CORE).catch(()=>null)));});
 self.addEventListener('activate',e=>{e.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(k=>k!==CACHE).map(k=>caches.delete(k)))));self.clients.claim();});

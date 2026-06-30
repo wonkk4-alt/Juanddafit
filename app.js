@@ -91,8 +91,24 @@ function jfLoadFirebaseLibs(){
   return __jfFirebasePromise;
 }
 
+var __jfAuthPersistencePromise = null;
+
+function jfEnsureAuthPersistence(){
+  if(!auth || typeof firebase === 'undefined' || !firebase.auth || !firebase.auth.Auth) return Promise.resolve(true);
+  if(__jfAuthPersistencePromise) return __jfAuthPersistencePromise;
+  try{
+    __jfAuthPersistencePromise = auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL)
+      .then(function(){ return true; })
+      .catch(function(e){ console.warn('auth persistence local:', e); return true; });
+  }catch(e){
+    console.warn('auth persistence local sync:', e);
+    __jfAuthPersistencePromise = Promise.resolve(true);
+  }
+  return __jfAuthPersistencePromise;
+}
+
 async function ensureFirebaseReady(){
-  if(auth && db_fs) return true;
+  if(auth && db_fs){ await jfEnsureAuthPersistence(); return true; }
   try{
     await jfLoadFirebaseLibs();
     var ok = initFirebaseOnce();
@@ -100,6 +116,7 @@ async function ensureFirebaseReady(){
       __jfFirebasePromise = null;
       throw new Error('Firebase no quedó inicializado.');
     }
+    await jfEnsureAuthPersistence();
     return true;
   }catch(e){
     __jfFirebasePromise = null;
@@ -146,6 +163,12 @@ function initFirebaseOnce(){
       firebase.initializeApp(firebaseConfig);
     }
     auth = firebase.auth();
+    try{
+      // Mantiene la sesión abierta aun cuando el usuario recarga la app o cierra y abre el navegador.
+      if(firebase.auth && firebase.auth.Auth && auth.setPersistence){
+        auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL).catch(function(e){ console.warn('auth persistence:', e); });
+      }
+    }catch(e){ console.warn('auth persistence init:', e); }
     db_fs = firebase.firestore();
     try{ db_fs.settings({ cacheSizeBytes: firebase.firestore.CACHE_SIZE_UNLIMITED }); }catch(e){}
     // Persistencia offline omitida en arranque para priorizar carga ultrarrápida en móvil.
@@ -163,6 +186,7 @@ const DB = {
   // ── Auth ────────────────────────────────────────────────────────────────────
   async registerUser(email, password, name, tel){
     await ensureFirebaseReady();
+    await jfEnsureAuthPersistence();
     const cred = await auth.createUserWithEmailAndPassword(email.trim().toLowerCase(), password);
     const uid = cred.user.uid;
     const doc = {
@@ -179,6 +203,7 @@ const DB = {
 
   async loginUser(email, password){
     await ensureFirebaseReady();
+    await jfEnsureAuthPersistence();
     const cred = await auth.signInWithEmailAndPassword(email.trim().toLowerCase(), password);
     const snap = await db_fs.collection('users').doc(cred.user.uid).get();
     if(!snap.exists) throw new Error('Usuario no encontrado.');
@@ -556,6 +581,82 @@ const DB = {
           cb(snap.docs.map(d=>({id:d.id,...d.data()})).filter(x=>!x.deleted));
         }, err=>console.warn('watchCustomExercises error:', err));
     }, 'watchCustomExercises');
+  },
+
+  getCustomCategoriesLocal(){
+    try{
+      const local = JSON.parse(localStorage.getItem('jf_custom_categories')||'[]');
+      return Array.isArray(local) ? local.map(x=>typeof x==='string'?{name:x}:x).filter(x=>x&&x.name) : [];
+    }catch(e){ return []; }
+  },
+
+  cacheCustomCategories(items){
+    try{
+      const seen={};
+      const clean=(items||[]).map(x=>typeof x==='string'?{name:x}:x).filter(x=>x&&x.name).filter(x=>{
+        const k=String(x.name).trim().toLowerCase();
+        if(!k || seen[k])return false;
+        seen[k]=true;
+        return true;
+      });
+      localStorage.setItem('jf_custom_categories', JSON.stringify(clean));
+      return clean;
+    }catch(e){ return items||[]; }
+  },
+
+  async getCustomCategories(){
+    const local = this.getCustomCategoriesLocal();
+    try{
+      await ensureFirebaseReady();
+      const snap = await db_fs.collection('appMeta').doc('exerciseCategories').get();
+      const data = snap.exists ? (snap.data() || {}) : {};
+      const remoteField = data.items || {};
+      const remote = Array.isArray(remoteField)
+        ? remoteField.map(x=>typeof x==='string'?{name:x}:x)
+        : Object.keys(remoteField).map(k=>({name:(remoteField[k]&&remoteField[k].name)||k, ...(remoteField[k]||{})}));
+      return this.cacheCustomCategories(local.concat(remote));
+    }catch(e){
+      console.warn('getCustomCategories fallback local:', e);
+      return local;
+    }
+  },
+
+  async saveCustomCategory(name, meta){
+    const clean = cleanCategoryName(name);
+    if(!clean) throw new Error('Categoría inválida.');
+    const item = {name: clean, createdAt: Date.now(), ...(meta||{})};
+    const local = this.getCustomCategoriesLocal().filter(x=>String(x.name).toLowerCase()!==clean.toLowerCase());
+    local.push(item);
+    this.cacheCustomCategories(local);
+    try{
+      await ensureFirebaseReady();
+      const key = clean.replace(/[.#$/\[\]]/g,'_');
+      await db_fs.collection('appMeta').doc('exerciseCategories').set({
+        items: {[key]: item},
+        updatedAt: Date.now()
+      }, {merge:true});
+    }catch(e){
+      console.warn('saveCustomCategory remote fallback local:', e);
+    }
+    return item;
+  },
+
+  watchCustomCategories(cb){
+    const emit = (items)=>{
+      const clean = this.cacheCustomCategories(items||[]);
+      if(typeof cb === 'function') cb(clean);
+    };
+    try{ emit(this.getCustomCategoriesLocal()); }catch(e){}
+    return jfStartFirebaseWatch(()=>{
+      return db_fs.collection('appMeta').doc('exerciseCategories').onSnapshot(snap=>{
+        const data = snap.exists ? (snap.data() || {}) : {};
+        const field = data.items || {};
+        const items = Array.isArray(field)
+          ? field.map(x=>typeof x==='string'?{name:x}:x)
+          : Object.keys(field).map(k=>({name:(field[k]&&field[k].name)||k, ...(field[k]||{})}));
+        emit(items);
+      }, err=>console.warn('watchCustomCategories error:', err));
+    }, 'watchCustomCategories');
   },
 
   // ── Solicitudes de ayuda ──────────────────────────────────────────────────────
@@ -1009,9 +1110,31 @@ const MW_URL={
 
 const ALL_EXERCISES = Object.values(CAT).filter(Array.isArray).flat();
 function getEx(id){return Object.values(CAT).filter(Array.isArray).flat().find(e=>e.id===id);}
+function cleanCategoryName(name){
+  return String(name||'').replace(/\s+/g,' ').trim().toUpperCase();
+}
+function ensureExerciseCategory(name){
+  const clean = cleanCategoryName(name);
+  if(!clean) return '';
+  const existing = Object.keys(CAT).find(k=>Array.isArray(CAT[k]) && k.toLowerCase()===clean.toLowerCase());
+  if(existing) return existing;
+  CAT[clean]=[];
+  return clean;
+}
+function mergeCustomCategories(items){
+  if(!Array.isArray(items))return;
+  items.forEach(item=>{
+    const name = typeof item==='string' ? item : (item && item.name);
+    ensureExerciseCategory(name);
+  });
+}
 function catColor(cat){
   const colors={'PECHO · HOMBRO · TRICEPS':'#ef4444','ESPALDA · BICEPS':'#3b82f6','PIERNA':'#22c55e','GLÚTEO':'#a855f7','PILAR · ESTABILIDAD':'#f59e0b','MOVILIDAD':'#06b6d4','CARDIO · VASCULAR':'#00bcd4','ESTIRAMIENTO':'#14b8a6'};
-  return colors[cat]||'#64748b';
+  if(colors[cat]) return colors[cat];
+  const palette=['#00bcd4','#22c55e','#a855f7','#f59e0b','#3b82f6','#14b8a6','#ef4444'];
+  let h=0;
+  String(cat||'').split('').forEach(ch=>{ h=(h*31+ch.charCodeAt(0))>>>0; });
+  return palette[h%palette.length]||'#64748b';
 }
 function exColor(exId){
   for(const [cat,exs] of Object.entries(CAT)){ if(Array.isArray(exs) && exs.find(e=>e.id===exId)) return catColor(cat); }
@@ -1039,7 +1162,7 @@ function mergeCustomExercises(customs){
   if(!Array.isArray(customs))return;
   customs.forEach(raw=>{
     if(!raw || !raw.id || !raw.name || raw.deleted || isExerciseDeleted(raw.id))return;
-    const cat = raw.category || raw.cat || getCategoryOptions()[0];
+    const cat = ensureExerciseCategory(raw.category || raw.cat || getCategoryOptions()[0]);
     if(!cat || !CAT[cat])return;
     const ex = {
       id: raw.id,
@@ -1161,13 +1284,20 @@ function App(){
     return ()=>window.removeEventListener('jf-ex-imgs-ready', refresh);
   },[]);
 
-  // Catálogo global diferido: no bloquea la pantalla inicial.
+  // Catálogo global diferido: carga categorías primero para que los ejercicios personalizados
+  // no se pierdan si pertenecen a una categoría creada por el entrenador.
   useEffect(()=>{
     let mounted=true;
     let unsub=null;
+    let unsubCat=null;
     const timer=setTimeout(async ()=>{
       try{
         await ensureFirebaseReady();
+        const categories = await DB.getCustomCategories();
+        if(mounted) mergeCustomCategories(categories);
+        unsubCat = DB.watchCustomCategories(items=>{
+          if(mounted) mergeCustomCategories(items||[]);
+        });
         const customs = await DB.getCustomExercises();
         if(mounted) mergeCustomExercises(customs);
         unsub = DB.watchCustomExercises(customs=>{
@@ -1176,20 +1306,33 @@ function App(){
       }catch(e){
         console.warn('global exercise catalog deferred load error:', e);
       }
-    }, 7000);
-    return ()=>{mounted=false; clearTimeout(timer); if(typeof unsub==='function')unsub();};
+    }, 2500);
+    return ()=>{
+      mounted=false;
+      clearTimeout(timer);
+      if(typeof unsub==='function')unsub();
+      if(typeof unsubCat==='function')unsubCat();
+    };
   },[]);
 
   useEffect(()=>{
-    // Arranque ultrarrápido: mostrar la app inmediatamente y restaurar sesión después.
+    // No mostrar la pantalla de login mientras Firebase intenta restaurar la sesión local.
+    // Así, al recargar la app, el usuario/entrenador vuelve directo a su panel si su sesión sigue vigente.
     let cancelled=false;
     let unsubAuth=null;
-    setAuthReady(true);
+    let resolved=false;
 
-    const restoreTimer = setTimeout(async ()=>{
+    function finish(){
+      if(cancelled || resolved) return;
+      resolved=true;
+      setAuthReady(true);
+    }
+
+    async function restoreSession(){
       try{
         await ensureFirebaseReady();
-        if(cancelled || !auth) return;
+        await jfEnsureAuthPersistence();
+        if(cancelled || !auth){ finish(); return; }
         unsubAuth = auth.onAuthStateChanged(async (firebaseUser) => {
           try{
             if(firebaseUser){
@@ -1198,8 +1341,13 @@ function App(){
                 const theme = getTrainerTheme(0);
                 setTrainer({...doc,...theme});
                 setUser(null);
+                localStorage.setItem('jf_current_session', doc.email || firebaseUser.email || '');
               } else if(doc && doc.role==='user'){
                 setUser(doc);
+                setTrainer(null);
+                localStorage.setItem('jf_current_session', doc.email || firebaseUser.email || '');
+              } else {
+                setUser(null);
                 setTrainer(null);
               }
             } else {
@@ -1211,20 +1359,32 @@ function App(){
                     const theme = getTrainerTheme(0);
                     setTrainer({...doc,...theme});
                     setUser(null);
+                  } else if(doc && doc.role==='user'){
+                    setUser(doc);
+                    setTrainer(null);
                   }
-                }catch(e){ console.warn('trainer session restore:',e); }
+                }catch(e){ console.warn('session restore from local email:',e); }
               }
             }
           }catch(e){ console.warn('session restore error',e); }
-          setAuthReady(true);
+          finish();
         });
       }catch(e){
         console.warn('Firebase se cargará al iniciar sesión:', e);
-        setAuthReady(true);
+        finish();
       }
-    }, 1800);
+    }
 
-    return ()=>{ cancelled=true; clearTimeout(restoreTimer); if(typeof unsubAuth==='function')unsubAuth(); };
+    const fallback = setTimeout(function(){
+      if(!resolved){ console.warn('session restore timeout'); finish(); }
+    }, 6500);
+    restoreSession();
+
+    return ()=>{
+      cancelled=true;
+      clearTimeout(fallback);
+      if(typeof unsubAuth==='function')unsubAuth();
+    };
   },[]);
 
   // Derivar pantalla del estado, no de una variable separada
@@ -1457,11 +1617,13 @@ function TrainerLoginScreen({onBack, onLogin}){
       const email = trainerDoc.email;
       const password = 'juandafit_' + pin; // password derivada del PIN
       try{
+        await jfEnsureAuthPersistence();
         await auth.signInWithEmailAndPassword(email, password);
       }catch(authErr){
         if(authErr.code === 'auth/user-not-found' || authErr.code === 'auth/invalid-credential' || authErr.code === 'auth/wrong-password'){
           // Primera vez: crear el usuario en Firebase Auth
           try{
+            await jfEnsureAuthPersistence();
             await auth.createUserWithEmailAndPassword(email, password);
           }catch(createErr){
             // Si ya existe pero con otra contraseña, actualizar
@@ -2955,6 +3117,9 @@ function DayEditTrainer({user:u,trainer,day,exercises,notes,onBack,onSave,onUpda
   const [newExDraft,setNewExDraft]=useState(defaultNewExerciseDraft());
   const [savingNewEx,setSavingNewEx]=useState(false);
   const [deletingExId,setDeletingExId]=useState(null);
+  const [newCategoryOpen,setNewCategoryOpen]=useState(false);
+  const [newCategoryName,setNewCategoryName]=useState('');
+  const [savingNewCategory,setSavingNewCategory]=useState(false);
 
   // Load global custom exercise catalog and global deletions; keep them synced for all trainers.
   useEffect(()=>{
@@ -2970,6 +3135,9 @@ function DayEditTrainer({user:u,trainer,day,exercises,notes,onBack,onSave,onUpda
     }
     async function loadCustomCatalog(){
       try{
+        const categories = await DB.getCustomCategories();
+        mergeCustomCategories(categories);
+        bump();
         const customs = await DB.getCustomExercises();
         applyCatalog(customs);
       }catch(e){
@@ -2986,10 +3154,12 @@ function DayEditTrainer({user:u,trainer,day,exercises,notes,onBack,onSave,onUpda
     }
     loadDeletedCatalog();
     loadCustomCatalog();
+    const unsubCat = DB.watchCustomCategories(items=>{ mergeCustomCategories(items||[]); bump(); });
     const unsubCustom = DB.watchCustomExercises(applyCatalog);
     const unsubDeleted = DB.watchDeletedExercises(applyDeleted);
     return ()=>{
       mounted=false;
+      if(typeof unsubCat==='function')unsubCat();
       if(typeof unsubCustom==='function')unsubCustom();
       if(typeof unsubDeleted==='function')unsubDeleted();
     };
@@ -3079,9 +3249,38 @@ function DayEditTrainer({user:u,trainer,day,exercises,notes,onBack,onSave,onUpda
     compressImageFile(file, dataUrl=>setExInfoDraft(d=>({...d,customImg:dataUrl})), ()=>alert('No se pudo cargar la imagen.'));
   }
 
+  async function createNewCategory(){
+    const clean = cleanCategoryName(newCategoryName);
+    if(!clean){ alert('Escribe el nombre de la categoría.'); return; }
+    const existing = getCategoryOptions().find(cat=>cat.toLowerCase()===clean.toLowerCase());
+    if(existing){
+      ensureExerciseCategory(existing);
+      setNewExDraft(d=>({...d,category:existing}));
+      setOpenCat(existing);
+      setNewCategoryName('');
+      alert('Esa categoría ya existe. La dejamos seleccionada para crear ejercicios.');
+      return;
+    }
+    setSavingNewCategory(true);
+    try{
+      const item = await DB.saveCustomCategory(clean,{createdBy:(trainer&&trainer.uid)||(trainer&&trainer.email)||''});
+      const cat = ensureExerciseCategory(item.name || clean);
+      setNewExDraft(d=>({...d,category:cat}));
+      setOpenCat(cat);
+      setCatalogVersion(v=>v+1);
+      setNewCategoryName('');
+      setNewCategoryOpen(false);
+      alert('Categoría creada. Ahora puedes seleccionarla al crear ejercicios.');
+    }catch(e){
+      console.error('createNewCategory error:', e);
+      alert('No se pudo crear la categoría: '+(e.message||'verifica conexión y permisos de Firestore'));
+    }
+    setSavingNewCategory(false);
+  }
+
   async function createNewExercise(){
     const name=(newExDraft.name||'').trim();
-    const category=newExDraft.category;
+    const category=ensureExerciseCategory(newExDraft.category);
     if(!name){ alert('Escribe el nombre del ejercicio.'); return; }
     if(!category || !CAT[category]){ alert('Selecciona una categoría válida.'); return; }
     setSavingNewEx(true);
@@ -3299,6 +3498,20 @@ function DayEditTrainer({user:u,trainer,day,exercises,notes,onBack,onSave,onUpda
         exercises.length>0&&React.createElement('button',{className:'btn btn-primary',onClick:onSave,style:{marginTop:8}},'Guardar rutina')
       ),
       tab==='add'&&React.createElement('div',null,
+        React.createElement('div',{className:'card',style:{border:'1.5px solid '+trainer.color+'55',marginBottom:12}},
+          React.createElement('div',{onClick:()=>setNewCategoryOpen(!newCategoryOpen),style:{display:'flex',justifyContent:'space-between',alignItems:'center',cursor:'pointer'}},
+            React.createElement('div',null,
+              React.createElement('div',{style:{fontSize:13,fontWeight:900,color:'#e2f7fb'}},'Crear categoría de ejercicios'),
+              React.createElement('div',{style:{fontSize:11,color:'#7aadbe',marginTop:2}},'El entrenador podrá agrupar nuevos ejercicios en esta categoría')
+            ),
+            React.createElement('span',{style:{color:trainer.color,fontSize:18,fontWeight:900}},newCategoryOpen?'−':'+')
+          ),
+          newCategoryOpen&&React.createElement('div',{style:{marginTop:12,borderTop:'1px solid #1e3347',paddingTop:12}},
+            React.createElement('label',{className:'label'},'Nombre de la categoría'),
+            React.createElement('input',{className:'inp',value:newCategoryName,onChange:e=>setNewCategoryName(e.target.value),onKeyDown:e=>{if(e.key==='Enter')createNewCategory();},placeholder:'Ej: Glúteo / Potencia / Rehabilitación',style:{marginBottom:10}}),
+            React.createElement('button',{className:'btn btn-primary',disabled:savingNewCategory,onClick:createNewCategory},savingNewCategory?'Creando...':'Crear categoría')
+          )
+        ),
         React.createElement('div',{className:'card',style:{border:'1.5px solid '+trainer.color+'55',marginBottom:12}},
           React.createElement('div',{onClick:()=>setNewExOpen(!newExOpen),style:{display:'flex',justifyContent:'space-between',alignItems:'center',cursor:'pointer'}},
             React.createElement('div',null,
